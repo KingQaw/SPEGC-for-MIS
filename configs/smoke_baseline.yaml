@@ -1,0 +1,84 @@
+# CPU smoke-test configuration for SPEGC.
+#
+# Purpose: exercise the full train -> checkpoint -> evaluate pipeline on the
+# tiny synthetic dataset produced by tools/make_synthetic_fundus.py, without
+# real data, without pretrained weights and without a GPU.
+#
+# It mirrors configs/seg_res50fpn_source.yaml (same meta-architecture,
+# PseudoLabRPN + StandardROIHeadsPseudoLab, MASK_ON, NUM_CLASSES=1) but:
+#   * points DATASETS at the synthetic COCO splits,
+#   * disables AMP and forces MODEL.DEVICE=cpu (works in sandboxes without
+#     /dev/dxg; delete the DEVICE line to use the GPU),
+#   * starts from random weights (MODEL.WEIGHTS "") so nothing is downloaded,
+#   * runs 2 iterations at tiny resolution,
+#   * sets TEST.TTT False: detectron2's EvalHook always evaluates after the
+#     final iteration, and BaselineTrainer.test() calls optimizer.zero_grad()
+#     inside its TTT block, where the training-time EvalHook passes no
+#     optimizer.
+_BASE_: "./Base-RCNN-FPN.yaml"
+
+OUTPUT_DIR: "output/smoke_baseline"
+
+DATASETS:
+  TRAIN: ("SynthFundus_train",)
+  TEST: ("SynthFundus_test",)
+
+MODEL:
+  WEIGHTS: ""
+  META_ARCHITECTURE: "DAobjTwoStagePseudoLabGeneralizedRCNN"
+  MASK_ON: True
+  DEVICE: "cpu"
+  RESNETS:
+    DEPTH: 50
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+  PROPOSAL_GENERATOR:
+    NAME: "PseudoLabRPN"
+  ROI_HEADS:
+    NAME: "StandardROIHeadsPseudoLab"
+    NUM_CLASSES: 1
+    IN_FEATURES: ["p2", "p3", "p4", "p5"]
+    # A model trained for 2 iterations has a near-random box head, so every
+    # proposal falls below the default 0.05 threshold and the evaluator would
+    # receive zero predictions -- DiceEvaluator.evaluate() then does
+    # np.mean([]) and reports nan ("Mean of empty slice").  Keeping all
+    # proposals makes the metric code path actually execute and produce
+    # numbers.  The values are meaningless, but they prove the evaluator ran.
+    SCORE_THRESH_TEST: 0.0
+  ROI_BOX_HEAD:
+    NAME: "FastRCNNConvFCHead"
+    NUM_FC: 2
+    POOLER_RESOLUTION: 7
+
+SOLVER:
+  AMP:
+    ENABLED: False
+  MAX_ITER: 2
+  IMS_PER_BATCH: 1
+  BASE_LR: 0.0025
+  CHECKPOINT_PERIOD: 1
+
+SEMISUPNET:
+  Trainer: baseline
+  BBOX_THRESHOLD: 0.8
+  TEACHER_UPDATE_ITER: 1
+  EMA_KEEP_RATE: 0.9996
+  UNSUP_LOSS_WEIGHT: 1.0
+  SUP_LOSS_WEIGHT: 1.0
+  DIS_TYPE: "p2"
+
+TEST:
+  EVAL_PERIOD: 0
+  TTT: False
+  DICE_THRES: 0.0  # keep every prediction so the synthetic run reports metrics
+
+INPUT:
+  FORMAT: "RGB"
+  MIN_SIZE_TRAIN: (256,)
+  MAX_SIZE_TRAIN: 320
+  MIN_SIZE_TEST: 256
+  MAX_SIZE_TEST: 320
+
+DATALOADER:
+  NUM_WORKERS: 0

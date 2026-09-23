@@ -8,10 +8,17 @@
 Thumbs.db
 
 # Project-specific Data & Checkpoints
-weights/
-datasets/
-output/
-checkpoint/
+# NOTE: these patterns are anchored to the repository root on purpose.
+# Unanchored "datasets/" and "checkpoint/" also match the *source packages*
+# data/datasets/ and checkpoint/, which silently kept them out of the release.
+/weights/
+/datasets/
+/output/
+# "checkpoint/" at the repo root is BOTH an output directory and the source
+# package imported by engine/trainer.py. Ignore its contents but keep the
+# .py sources (git cannot re-include files under a fully excluded directory).
+/checkpoint/*
+!/checkpoint/*.py
 *.pth
 *.pkl
 
@@ -26,6 +33,9 @@ result.txt
 env/
 venv/
 ENV/
+
+# Local build/install caches used by tools/setup_env.sh (conda pkgs, pip, logs)
+/.cache/
 
 # IDEs and Editors
 .vscode/
