@@ -1,0 +1,61 @@
+# 本地眼底评测配置（只用 datasets/raw 里确实可用、且带 OD/OC 掩膜的目标域）
+#
+# 与 configs/test_segment.yaml 的模型部分完全一致（NUM_CLASSES: 2，对应
+# weights/fundus_source/*.pth），区别只在 DATASETS.TEST 的域名。
+#
+# 可用域：
+#   REFUGE_train / REFUGE_Valid        (400 / 400，有掩膜)
+#   RIM_ONE_r3_train / RIM_ONE_r3_test (111 / 48，无官方划分，脚本自建)
+#   Drishti_GS_train / Drishti_GS_test (50 / 51)
+#
+# 不可用（因此未列入）：
+#   ORIGA_train / ORIGA_test  —— 本下载只有 jpg + 青光眼分类 csv，没有分割掩膜
+#   REFUGE_test               —— 400 张图没有官方标注，算 Dice 无意义
+#
+# 切换目标域：直接改下面的 TEST 列表，或用命令行覆盖，例如
+#   ... DATASETS.TEST '("RIM_ONE_r3_test", "Drishti_GS_test")'
+_BASE_: "./Base-RCNN-FPN.yaml"
+
+OUTPUT_DIR: "output/test_fundus_local"
+
+DATASETS:
+  TEST: ("Drishti_GS_test",)
+
+MODEL:
+  # 权重由命令行 MODEL.WEIGHTS 指定，例如 weights/fundus_source/model_B.pth
+  META_ARCHITECTURE: "DAobjTwoStagePseudoLabGeneralizedRCNN"
+  MASK_ON: True
+  RESNETS:
+    DEPTH: 50
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+  PROPOSAL_GENERATOR:
+    NAME: "PseudoLabRPN"
+  ROI_HEADS:
+    NAME: "StandardROIHeadsPseudoLab"
+    NUM_CLASSES: 2
+    IN_FEATURES: ["p2", "p3", "p4", "p5"]
+  ROI_BOX_HEAD:
+    NAME: "FastRCNNConvFCHead"
+    NUM_FC: 2
+    POOLER_RESOLUTION: 7
+
+SEMISUPNET:
+  Trainer: baseline
+  BBOX_THRESHOLD: 0.8
+  DIS_TYPE: "p2"
+
+TEST:
+  TTT: True
+  # 每个域先只做少量 TTT 步，验证流程；设成 null 则跑完整个数据流
+  MIN_BATCH_NUM: 4
+  CTTA_POOL_SIZE: 3
+  CTTA_MIN_POOL_SIZE: 1
+  CTTA_ENABLE_SINGLE_GRAPH: True
+
+INPUT:
+  FORMAT: "RGB"
+
+DATALOADER:
+  NUM_WORKERS: 0

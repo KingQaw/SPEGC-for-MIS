@@ -54,10 +54,16 @@ _REPO_ROOT = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 )
 
-# The segmentation targets of this paper are binary (lesion / structure vs.
-# background); every shipped config that trains uses MODEL.ROI_HEADS.NUM_CLASSES = 1,
-# which matches a single foreground category remapped to contiguous id 0.
-_DEFAULT_THING_CLASSES = ("lesion",)
+# NOTE: thing_classes is NOT hard-coded here.
+# detectron2's load_coco_json derives thing_classes from the JSON's own
+# "categories" and asserts that any pre-existing value matches:
+#     AssertionError: Attribute 'thing_classes' in the metadata of 'X'
+#     cannot be set to a different value!
+# A guess here would therefore break every dataset whose category names differ
+# (fundus = optic_disc/optic_cup with NUM_CLASSES=2, polyp = single class with
+# NUM_CLASSES=1, synthetic = lesion), so the JSON stays the single source of
+# truth.  evaluator_type -- the one key build_evaluator reads eagerly -- is set
+# by register_coco_instances itself.
 
 # --- real datasets -----------------------------------------------------------------
 # Fundus target domains, per README.md.
@@ -79,7 +85,7 @@ def _release_root(*parts):
     return os.path.join(_REPO_ROOT, *parts)
 
 
-def _register_coco(name, json_file, image_root, thing_classes=_DEFAULT_THING_CLASSES):
+def _register_coco(name, json_file, image_root):
     """Lazily register one COCO instance-segmentation dataset.
 
     ``register_coco_instances`` stores a thunk, so no file is opened here; the
@@ -91,7 +97,7 @@ def _register_coco(name, json_file, image_root, thing_classes=_DEFAULT_THING_CLA
         return False
     register_coco_instances(
         name,
-        {"thing_classes": list(thing_classes)},
+        {},
         json_file,
         image_root,
     )
