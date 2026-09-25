@@ -252,6 +252,55 @@ missing = set(all_names) - set(cfg[k])   # 恰好等于 dom[k]
    - Kaggle 上有多个 ORIGA 变体（有的 520 张、有的 650 张），需逐个确认是否含
      `Masks/`。
 
+### 实际尝试结果（2026-09）
+
+**方法 3（Wayback Machine）在本机执行不了**——不是页面不存在，而是这个环境的
+出网是**白名单制**。实测：
+
+| 主机 | 结果 |
+|---|---|
+| `pypi.org` / `ar5iv.labs.arxiv.org` | HTTP 200 ✓ |
+| `www.bing.com` | HTTP 302 ✓ |
+| `web.archive.org` | `Connection refused`（21 ms，IPv4 `130.211.15.150` 直连也拒） |
+| `archive.org` | 连接超时 |
+| `arquivo.pt` | 连接超时 |
+| `timetravel.mementoweb.org` | DNS 解析失败 |
+| `github.com` | 连接超时 |
+| `www.google.com` | `Connection reset` |
+
+（`web_fetch` 工具另有一层 SSRF 保护，对 `web.archive.org` 直接报
+"resolves to a non-public IP address"。）**你自己在能正常上网的机器上可以试这个
+链接**：
+`https://web.archive.org/web/2020/http://imed.nimte.ac.cn/resources.html`
+
+**顺带验证了一个 Zenodo 上的替代源 —— 结论是否定的。**
+iMED 现在的新数据集（CORN、COSTA）都托管在 Zenodo，所以顺手搜了 Zenodo 上
+type=dataset 的 ORIGA 记录，只有一条：
+
+- `Diabetic Glaucoma(ORIGA,REFUGE,ACRIMA)`，
+  DOI [10.5281/zenodo.10674885](https://doi.org/10.5281/zenodo.10674885)，
+  CC-BY-4.0，其中 `ORIGA.rar` **475 MB**（对比 Kaggle 分类版仅 9.8 MB，
+  体量上很像完整版）。
+
+为避免白下 475 MB，只取了文件头/尾共 24 MB 解析 RAR5 索引，得到完整清单
+（650 个文件）：
+
+| 目录 | 文件数 |
+|---|---|
+| `ORIGA/ORIGA/Training/normal` | 386 |
+| `ORIGA/ORIGA/Training/glaucoma` | 134 |
+| `ORIGA/ORIGA/Testing/normal` | 96 |
+| `ORIGA/ORIGA/Testing/glaucoma` | 34 |
+| **合计** | **650，扩展名全部是 `jpg`** |
+
+650 张、168 青光眼 / 482 正常，与官方发布公告的画像完全吻合——**图像确实是
+官方 ORIGA-650，但同样没有任何分割掩膜**（无 png / mat / 标注文件），
+只是分辨率更高的分类版。所以这条线索**不能解决掩膜问题**。
+
+**结论：方法 3 走不通（环境限制），方法 4 的 Zenodo 分支已排除。**
+剩下真正可行的是方法 1（问作者）和方法 2（问 iMED），以及方法 4 里那些
+明确带 `Masks/` 目录的中文镜像。
+
 **拿到数据后要核对的三件事**（都是本项目踩过的坑）：
 
 1. **类别 ID 顺序**：官方 `Masks` 里哪张是 cup、哪张是 disc，对应到 JSON 的
