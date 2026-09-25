@@ -213,6 +213,54 @@ missing = set(all_names) - set(cfg[k])   # 恰好等于 dom[k]
 `RIM_ONE_r3_train/test`(159)、`Drishti_GS_train/test`(101)。
 `REFUGE_test`(400) 只能用于无监督适应，不能用于报指标。
 
+### ORIGA-650 获取途径调研（2026-09 核实）
+
+**官方渠道已关闭。** iMED 官方数据集页（<https://imed.nimte.ac.cn/download.html>）
+上明确写着：
+
+> **！Origa-650（no longer available to the public, 不再提供下载！）**
+
+页面更新日期 `2020-05-27`。2017 年发布公告里给的下载地址
+`http://imed.nimte.ac.cn/resources.html` 现在返回「栏目不存在」。
+
+**官方数据集本身是带 OD/OC 掩膜的。** 2017 年发布公告原文：
+
+> iMED-Origa650数据集是由丰富临床经验的专业医生标注的 650 张眼底图，
+> 其中 168 张青光眼患者的眼底图，482 张正常人群的眼底图
+
+用途就是「青光眼自动诊断和**视杯视盘分割**」。所以
+`datasets/raw/ORIGA`（Kaggle `ferencjuhsz/...`）只有分类 csv，是个**残缺子集**，
+不是官方完整版。
+
+**可尝试的途径（按推荐顺序）**：
+
+1. **直接联系论文作者**（最实际）。SPEGC 把 ORIGA 当作 Domain C 使用，
+   作者手上必然有带掩膜的版本，甚至可能就是他们的划分。论文给出的邮箱：
+   `duxiaogang@sust.edu.cn`（杜晓刚，一作）、`leitao@sust.edu.cn`（雷涛，通讯）、
+   `hello.jiawei@outlook.com`。顺便还能确认类别 ID 顺序与 8:2 划分。
+2. **联系 iMED 实验室**。官方页留的联系人：岳星宇 `yuexingyu@nimte.ac.cn`。
+   公开下载虽已关闭，学术用途的个人申请可能仍受理。
+3. **Wayback Machine** 存档的旧下载页（本环境 DNS 受限打不开，可自行尝试）：
+   `https://web.archive.org/web/2020/http://imed.nimte.ac.cn/resources.html`
+4. **第三方镜像**（有掩膜，但来源非官方，需自行核对真实性）：
+   - CSDN 整理帖 <https://blog.csdn.net/weixin_43518285/article/details/148282613>
+     给出的目录含 `Masks/`、`Masks_Cropped/`、`Masks_Square/`、
+     `Semi-automatic-annotations/`、`Origalist.csv`（含 `ExpCDR`/`Glaucoma` 字段）。
+     ⚠️ 其中的 `Images_Square` / `Masks_Square` 很可能**已经是论文所说
+     "cropping the ROI" 之后的方形图**，用之前先核对尺寸。
+   - IEEE DataPort 有 "Glaucoma Screening dataset" 条目。
+   - Kaggle 上有多个 ORIGA 变体（有的 520 张、有的 650 张），需逐个确认是否含
+     `Masks/`。
+
+**拿到数据后要核对的三件事**（都是本项目踩过的坑）：
+
+1. **类别 ID 顺序**：官方 `Masks` 里哪张是 cup、哪张是 disc，对应到 JSON 的
+   `category_id` 顺序必须与 `weights/fundus_source/model_C.pth` 一致
+   （见第 1 节；类 0 = 视杯、类 1 = 视盘）。
+2. **划分**：论文是每域随机 8:2，需确认是否有官方划分文件。
+3. **图像是否已裁 ROI**：`_Square` 版可能已裁好，别重复裁剪。
+
+
 
 ---
 
