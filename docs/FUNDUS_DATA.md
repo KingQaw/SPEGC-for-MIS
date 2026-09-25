@@ -17,13 +17,50 @@
 
 来源见 `datasets/raw/README.md`（Kaggle / 百度 AI Studio / 官方站）。
 
-### 类别约定
+### 类别约定 —— **类别 ID 的顺序是个大坑**
 
 眼底任务是**视盘（OD）+ 视杯（OC）**两类的实例分割，对应
 `configs/test_segment.yaml` 的 `MODEL.ROI_HEADS.NUM_CLASSES: 2`——与
 `weights/fundus_source/*.pth` 完全一致（实测 `cls_score.weight` 形状 `(3, 1024)`
-= 2 类 + 1 背景）。转换后写成一个 `disc` 一个 `cup` 两个实例（视杯嵌套在视盘内，
-实例分割允许重叠）。
+= 2 类 + 1 背景）。
+
+detectron2 的 `load_coco_json` 会**按 category id 升序**重映射为 0..N-1，
+所以「JSON 里 id 小的」就是模型里的**类 0**。这个顺序必须和作者训练权重时一致：
+
+| JSON categories | 模型类 0 | 模型类 1 |
+|---|---|---|
+| `[{id:1,"optic_disc"}, {id:2,"optic_cup"}]`（**错**） | 视盘 | 视杯 |
+| `[{id:1,"optic_cup"}, {id:2,"optic_disc"}]`（**对**） | **视杯** | **视盘** |
+
+**怎么发现顺序反了的**：三个独立证据指向同一结论——
+
+1. **置信度**：模型的类 1 预测置信度中位 **0.99**，而类 0 几乎没有高分预测
+   （REFUGE 上类 0 的 max 只有 0.33，永远过不了 `DICE_THRES: 0.9`）。
+   大而好分的视盘没理由比视杯更不确定。
+2. **面积**：REFUGE 的 GT 面积中位数是 视盘 11608 / 视杯 2580，
+   而模型高分预测的面积中位数是 **15000** —— 明显是视盘，不是视杯。
+3. **指标上限**：若把模型的视盘预测拿去和 GT 的视杯比，
+   Dice 上限 = `2×2580/(15000+2580) ≈ 29%`，实测 **34.69%**，正好卡在这个上限附近。
+
+交换后语义也自洽了：类 0（视杯）面积中位数 < 类 1（视盘），比值
+REFUGE 0.234 / RIM-ONE 0.242 / Drishti 0.570，都符合已知的杯盘比。
+
+**影响**（`model_C.pth`，同一套权重、同一份数据，只改 JSON 里两个 id 的顺序）：
+
+| 数据集 | 顺序错 | **顺序对** |
+|---|---|---|
+| RIM_ONE_r3_test | 40.81% | **88.93%** |
+| RIM_ONE_r3_train | 41.33% | **89.35%** |
+| REFUGE_Valid | 33.30% | **81.00%** |
+| REFUGE_train | 30.53% | **81.45%** |
+| Drishti_GS_test | 74.52% | **89.35%** |
+| Drishti_GS_train | 73.22% | **88.92%** |
+
+> 这个坑不会报错、不会崩溃，只是**指标静默腰斩**。任何复现这类工作的人如果不
+> 去核对类别顺序，很容易误以为是自己训练/环境有问题。
+
+转换后每个实例一个类别（视杯嵌套在视盘内，实例分割允许重叠）。
+
 
 ---
 
@@ -46,14 +83,42 @@
 
 ### 其它格式陷阱
 
+- **RIM-ONE 的 "Stereo Images" 是左右两只眼并排**（第二个大坑）：
+  单张文件是 `2144×1424`，其实等于 **2 × 1072×1424**，左半和右半各是一张完整的
+  眼底图；而**标注只画在其中一半上**。实测全部 159 张的标注都在左半
+  （disc 掩膜中心 `cx/(W/2) ∈ [0.46, 0.56]`）。
+
+  不做切分就直接用整图的后果：模型会**正确地分割出两只眼**的视盘/视杯，
+  而 GT 只有一份，多出来的预测在 `DiceEvaluator` 里全部记为假阳性——
+  RIM-ONE 的 Dice 从 **88.93% 掉到 18.75%**。
+
+  脚本按掩膜实际位置判断该取哪一半（不硬编码"左"），并先切半再做 ROI 裁剪。
 - **Drishti_GS 掩膜尺寸比图像小**：掩膜 `2045×1752`，图像 `2047×1760`。
   转换时用最近邻放大对齐，否则逐像素比对会错位。
 - **RIM-ONE 无官方 train/test 划分**：自带的 MATLAB `Scripts/` 只有评测函数
   （`sevaluate.m`、`printTestResult.m`），没有划分定义。论文 4.2 节说明用的是
-  **「每个源数据集随机 8:2 划分」**，脚本据此生成（固定种子 `20260323`）。
+  **「每个源数据集随机 8:2 划分」**，脚本据此生成（整体随机、不分层，
+  固定种子 `20260323`）→ train 127 / test 32。
 - **Windows `Zone.Identifier` 侧写文件**：`datasets/raw` 下每个文件都带一个
   `xxx:Zone.Identifier` 同伴文件（ADS 标记），统计文件数时会翻倍，转换脚本
   统一过滤。
+
+### ROI 裁剪的实测结论
+
+论文要求「cropping the ROI of each image to 800×800」。实测**这四个数据集本身
+就已经被提供方裁到视网膜了**，所以 ROI 外接框≈整图，真正起作用的是**缩放到
+800×800**：
+
+| 数据集 | 原尺寸 | 非黑占比 | ROI 框 |
+|---|---|---|---|
+| REFUGE train | 2124×2056 | 0.79（≈π/4，内切圆） | ≈整图 |
+| REFUGE val | 1634×1634 | 0.72 | 1565×1565 |
+| Drishti_GS | 2045×1752 | 0.86 | ≈整图 |
+| RIM-ONE（切半后） | 1072×1424 | 0.91–0.99 | ≈整半 |
+
+实现上仍保留 ROI 检测（`fundus_roi_box`：灰度阈值取非黑外接框，圆形的外接框
+近似正方，所以缩放到 800×800 不会破坏几何比例），对未被裁好的数据能自动生效。
+
 
 ---
 
@@ -154,18 +219,25 @@ missing = set(all_names) - set(cfg[k])   # 恰好等于 dom[k]
 ## 4. 转换与用法
 
 ```bash
-# raw -> datasets/Fundus/<名字>/ (符号链接) + datasets/Fundus/<名字>_<划分>.json
+# raw -> datasets/Fundus/<名字>/{图像} + datasets/Fundus/<名字>_<划分>.json
+# 默认按论文协议：RIM-ONE 切半 -> ROI 裁剪 -> 缩放 800x800
 .venv/bin/python tools/prepare_fundus_data.py
 
 # 可选参数
 .venv/bin/python tools/prepare_fundus_data.py --datasets REFUGE Drishti_GS
 .venv/bin/python tools/prepare_fundus_data.py --rimone-expert exp1   # 换专家标注
+.venv/bin/python tools/prepare_fundus_data.py --roi-size 512         # 换输出尺寸
+.venv/bin/python tools/prepare_fundus_data.py --mode link            # 只建符号链接，不裁剪
+.venv/bin/python tools/prepare_fundus_data.py --no-rimone-split-stereo
 ```
 
-- **图像用符号链接，不复制数据**：1460 个链接只占 2.5 MB（原始数据 5.4 GB）。
+- **默认模式写出的是 800×800 的真实 JPEG**（1359 张，约 211 MB）；
+  `--mode link` 则保留原图、只建符号链接（1460 个链接约 2.5 MB），
+  用于不想改数据时的快速冒烟。
 - 布局与 `README.md` 的约定一致，且正是 `data/datasets/builtin.py` 注册的路径。
 - 输出是标准 COCO instance segmentation：多边形 `segmentation`、`bbox`、
   `iscrowd=0`、`ignore=0`、唯一 id。多边形经 `approxPolyDP` 抽稀。
+- ⚠️ 因为已经是 800×800，detectron2 的 `MIN_SIZE_TEST: 800` 不会再缩放它们。
 
 ### 转换正确性验证
 
@@ -221,25 +293,39 @@ DOMAINS='("Drishti_GS_test",)' bash tools/run_fundus_eval.sh   # 临时覆盖目
 > 只有显式设置 `DOMAINS` 才会覆盖。早期版本无条件用默认值覆盖，会把配置里的
 > `REFUGE_train`/`REFUGE_test` 悄悄挤掉——已修。
 
-### 结果 A：`model_C.pth`（源域 = ORIGA），复现 Table 1 的 Domain C 列
+### 结果 A：`model_C.pth`（源域 = ORIGA），对齐 Table 1 的 Domain C 列
 
-`configs/test_config_C.yaml`，目标域 = 域 A/B/D/E（不含 ORIGA）：
+`configs/test_config_C.yaml`，目标域 = 域 A/B/D/E（不含 ORIGA）。
+数据经 ROI 裁剪→800×800、RIM-ONE 已切半、类别 ID 已按作者顺序修正：
 
 | 数据集 | Dice | Enhanced Alignment | Structural Similarity |
 |---|---|---|---|
-| Drishti_GS_test | **75.71%** | 87.27% | 81.63% |
-| Drishti_GS_train | 72.94% | 84.78% | 79.64% |
-| REFUGE_Valid *(= 论文 Domain D)* | 31.55% | 46.84% | 53.61% |
-| REFUGE_train *(Domain B)* | 30.10% | 45.35% | 54.10% |
-| RIM_ONE_r3_test *(Domain A)* | 18.75% | 51.80% | 51.44% |
-| RIM_ONE_r3_train | 18.64% | 51.56% | 51.52% |
+| Drishti_GS_test *(Domain E)* | **89.35%** | 97.40% | 92.52% |
+| Drishti_GS_train | 88.92% | 97.83% | 92.12% |
+| RIM_ONE_r3_test *(Domain A)* | **88.93%** | 97.25% | 91.43% |
+| RIM_ONE_r3_train | 89.35% | 97.45% | 91.75% |
+| REFUGE_train *(Domain B)* | 81.45% | 92.69% | 87.50% |
+| REFUGE_Valid *(Domain D)* | 81.00% | 95.09% | 85.50% |
 | **REFUGE_test**（**无标注**） | **0.0000%** | **0.0000%** | **0.0000%** |
-| ~~REFUGE_mean~~ | ~~20.55%~~ | ~~30.73%~~ | ~~35.91%~~ |
+| ~~REFUGE_mean~~ | ~~54.15%~~ | ~~62.59%~~ | ~~57.67%~~ |
 
-**`REFUGE_test` 实测三项全 0，并把 `REFUGE_mean` 从约 31% 拖到 20.55%**——
-这就是缺标注的具体后果，不是模型差。报指标时必须排除该集，或补齐标注。
+**与论文 Table 1 对比**（SPEGC 行，DSC）：
+
+| | Domain A | Domain B | Domain C | Domain D | Domain E |
+|---|---|---|---|---|---|
+| 论文 | 84.90 | 83.34 | 84.57 | 83.54 | 85.51 |
+| 本项目（仅 `model_C`） | **88.93** | **81.45** | — *(无 ORIGA)* | **81.00** | **89.35** |
+
+数量级已经对上（论文全表均值 84.37）。注意口径差异：论文每列是**留一平均**
+（4 个源模型的均值），我们只有 `model_C` 一个源模型；且这里用的是仓库
+`DiceEvaluator` 的口径，不是标准 DSC。
+
+`REFUGE_test` 无标注，三项全 0，把 `REFUGE_mean` 从 81.22% 拖到 54.15%
+（`(81.45+81.00)/2 = 81.22`）。报指标时必须排除该集或补齐标注。
 
 ### 结果 B：`model_B.pth`（源域 = REFUGE）
+
+> ⚠️ 此表是**修正类别顺序之前**跑的旧数据，仅供参考量级，不要与上表直接比较。
 
 | 数据集 | Dice | Enhanced Alignment | Structural Similarity |
 |---|---|---|---|
@@ -258,7 +344,7 @@ TTT 确实在生效——日志里每个域前几步的 loss 从 `None`（图池
 `model_C` 在 RIM-ONE 上从 10.43 收敛到 3.26），说明 SPEGC 的图聚类损失在反传、
 模型在在线适应。
 
-### RIM-ONE 为什么低这么多？——**指标定义**是主因
+### 指标口径：`DiceEvaluator` 不是标准 DSC
 
 `evaluation/dice_metric.py:49-77` 的实现是：
 
@@ -272,34 +358,58 @@ for pred_class, pred_mask in zip(pred_classes, pred_masks):
 ```
 
 即**对每个预测实例取最佳匹配后求均值**，而不是标准的按图/按类 Dice。
-后果是**假阳性会被当作 0 分拉低均值**。实测每图预测数：
+后果是**假阳性会被当作 0 分拉低均值**。
 
-| 数据集 | 预测/图 | 其中 ≥0.9 | GT/图 |
-|---|---|---|---|
-| Drishti_GS_test | 2.3 | 2.0 | 2.0 |
-| REFUGE_Valid | 2.8 | 1.2 | 2.0 |
-| RIM_ONE_r3_test | **4.5** | **3.8** | 2.0 |
+> ⚠️ **一个已修正的错误结论**：我最初把 RIM-ONE 的低分（18.75%）归因于这个
+> 指标口径 + 假阳性。**这是错的**。真正原因是两条：
+> (1) RIM-ONE 立体图没切半，模型分割了两只眼而 GT 只标了一只；
+> (2) **类别 ID 顺序反了**，模型的视盘预测被拿去和 GT 的视杯比。
+> 修完这两条后 RIM-ONE 到 88.93%。指标口径仍然是个需要注意的差异，但
+> **不是**当初低分的主因。
 
-RIM-ONE 上模型每图多产出约 1.8 个高置信度假阳性（真实域差异：立体眼底图、
-人群不同），在别的指标下影响有限，但在这个定义下被显著放大。
+我实测对比过两种口径（同一批预测、`model_C`、修正类别顺序**之前**的数据）：
 
-> **所以这三个数字不能直接和论文里的 Dice 对比**，除非确认论文用的是同一套
-> 评测代码的口径。跨数据集横向比较时也要记住这一点。
+| 数据集 | 每图预测 | 每图 GT | 命中率 | 仓库口径 | 标准 DSC |
+|---|---|---|---|---|---|
+| Drishti_GS_test | 1.1 | 2.0 | 0.51 | 74.52% | 37.86% |
+| REFUGE_Valid | 0.9 | 2.0 | 0.46 | 34.69% | 15.90% |
+| RIM_ONE_r3_test | 1.2 | 2.0 | 0.61 | 40.81% | 24.87% |
 
-### 未完成 / 可继续的方向
+可见标准 DSC 反而更低（因为它把漏检的类按 0 计入）。
+**论文的 DSC 究竟是哪种口径、是否对漏检做特殊处理，需要向作者确认**，
+否则数字不能严格对齐。
 
-1. **补 ROI 裁剪（优先级最高）**：论文对眼底图像先裁 ROI 再缩到 **800×800**，
-   当前实现是原图交给 `ResizeShortestEdge`。这一步不补，数值无法与 Table 1 对齐。
-2. **ORIGA**：申请带掩膜的 ORIGA-650，补齐配置 A/B/D/E（当前只有 C 能跑）。
-3. **RIM-ONE 划分**：论文说「随机 8:2」，当前脚本是分层 70/30（seed 固定）。
-   改成 8:2 才能对齐；另可试 `--rimone-expert exp1/exp2` 看标注选择的影响。
-4. **REFUGE_test 标注**：无标注，实测三项全 0 且污染 `REFUGE_mean`。
-   要么补齐标注，要么在 `DATASETS.TEST` 里移除。
+
+### 已完成的对齐工作（本轮）
+
+| 项 | 状态 | 效果 |
+|---|---|---|
+| RIM-ONE 立体图切半 | ✅ | Dice 18.75% → 40.81% |
+| ROI 裁剪 + 缩放 800×800 | ✅ | 与论文协议一致 |
+| RIM-ONE 随机 8:2 划分 | ✅ | 127 / 32，与论文 4.2 节一致 |
+| **类别 ID 顺序修正** | ✅ | **Dice 全面 → 81–89%，进入论文区间** |
+
+### 仍未完成 / 可继续的方向
+
+1. **ORIGA**：申请带掩膜的 ORIGA-650，补齐配置 A/B/D/E（当前只有 C 能跑）。
+2. **REFUGE_test 标注**：无标注，实测三项全 0 且污染 `REFUGE_mean`
+   （81.22% → 54.15%）。要么补齐标注，要么在 `DATASETS.TEST` 里移除。
+3. **Drishti 掩膜阈值**：目前 SoftMap 取 `>=128`（专家过半同意）。
+   试 `>=255`（全体同意）看对结果的影响 —— Drishti 的杯盘比 0.57 偏高，
+   阈值可能偏松。
+4. **RIM-ONE 专家标注**：默认用 `Average_masks`；可试
+   `--rimone-expert exp1/exp2` 对比。
 5. **模型 A/B/D/E**：`MODEL=X bash tools/run_fundus_eval.sh`。A/B/D/E 的测试列表
    含 ORIGA，补齐数据前跑不出完整结果（可临时用 `DOMAINS=` 指定子集）。
-6. **`test.sh` 原样复现**：需要先补齐 ORIGA 与 REFUGE_test，再改
+6. **指标口径**：论文的 DSC 与仓库 `DiceEvaluator` 口径不同（详见第 5 节末）。
+   若要严格对齐 Table 1，需要确认论文用的是哪种；论文每列是**留一平均**
+   （4 个源模型），我们目前只跑了单个源模型。
+7. **预处理归一化**：论文说 min-max，仓库配置用的是 detectron2 默认 ImageNet
+   统计量。当前沿用仓库设置（毕竟权重是用它训的）。
+8. **`test.sh` 原样复现**：需要先补齐 ORIGA 与 REFUGE_test，再改
    `configs/test_segment.yaml`（注意 `test.sh` 靠**行号** 5/7/9/11/13 做 sed，
    改文件会打乱映射）。当前用 `configs/test_config_C.yaml` 绕开了这个限制。
+
 
 ### 论文出处
 

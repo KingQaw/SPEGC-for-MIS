@@ -47,10 +47,22 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RAW = os.path.join(REPO, "datasets", "raw")
 OUT = os.path.join(REPO, "datasets", "Fundus")
 
-DISC_ID, CUP_ID = 1, 2
+# ⚠️ 类别 ID 的顺序必须与作者训练权重时一致，否则评测会严重偏低。
+#
+# detectron2 的 load_coco_json 按 category id 升序重映射成 0..N-1 的连续标签，
+# 所以"id 小的"就是模型里的类 0。实测 weights/fundus_source/*.pth：
+#   * 类 1 的预测置信度极高（中位 0.99）且掩膜面积中位数 ≈ 15000 px
+#   * 类 0 几乎没有高分预测
+# 而 REFUGE 的 GT 面积中位数是 视盘 11608 / 视杯 2580 —— 也就是说
+# **模型的类 1 是视盘、类 0 是视杯**。
+#
+# 若反过来（disc 占 id 1），模型的视盘预测会被拿去和 GT 的视杯比：
+# Dice 上限 = 2*2580/(15000+2580) ≈ 29%，实测 34.69%，正好卡在这个上限附近。
+# 交换后 REFUGE 从 ~34% 升到 ~80%（见 docs/FUNDUS_DATA.md）。
+CUP_ID, DISC_ID = 1, 2
 CATEGORIES = [
-    {"id": DISC_ID, "name": "optic_disc"},
     {"id": CUP_ID, "name": "optic_cup"},
+    {"id": DISC_ID, "name": "optic_disc"},
 ]
 
 
@@ -107,12 +119,46 @@ def mask_to_polygons(mask, min_area=20.0, eps_ratio=0.002):
     return polys
 
 
-class CocoBuilder:
-    """累积一个 COCO 数据集，并顺带建立图像符号链接。"""
+def fundus_roi_box(img, thresh=7, square=True, pad=0):
+    """求眼底图像的 ROI（视网膜圆形区域）裁剪框。
 
-    def __init__(self, name, split):
+    眼底图四周是黑色背景，直接用灰度阈值取非黑区域的外接框即可。
+    视网膜是圆形，其外接框近似正方形，所以裁成正方形再缩放不会破坏几何比例
+    —— 这正是论文「cropping the ROI ... to 800x800」能成立的前提。
+    """
+    gray = np.asarray(img.convert("L"))
+    ys, xs = np.where(gray > thresh)
+    if len(xs) < 100:                       # 阈值失效（整图过暗/过亮）时退回整图
+        return 0, 0, img.width, img.height
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    if square:
+        side = max(x1 - x0, y1 - y0) + 2 * pad
+        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
+        x0, y0 = cx - side // 2, cy - side // 2
+        x1, y1 = x0 + side, y0 + side
+        # 平移到图像范围内（保持尺寸不变）
+        x0 = max(0, min(x0, img.width - side))
+        y0 = max(0, min(y0, img.height - side))
+        x1, y1 = min(img.width, x0 + side), min(img.height, y0 + side)
+    return x0, y0, x1, y1
+
+
+class CocoBuilder:
+    """累积一个 COCO 数据集。
+
+    两种模式：
+      * ``mode="crop"``（默认，对应论文协议）：按 ROI 裁剪并缩放到
+        ``roi_size x roi_size``，**写出真实图像文件**，掩膜同步做相同变换。
+      * ``mode="link"``：原图不动，只建符号链接（用于快速冒烟，省磁盘）。
+    """
+
+    def __init__(self, name, split, mode="crop", roi_size=800, jpeg_quality=95):
         self.name = name
         self.split = split
+        self.mode = mode
+        self.roi_size = roi_size
+        self.jpeg_quality = jpeg_quality
         self.image_root = os.path.join(OUT, name)
         os.makedirs(self.image_root, exist_ok=True)
         self.images = []
@@ -120,16 +166,67 @@ class CocoBuilder:
         self._img_id = 0
         self._ann_id = 0
         self.skipped = 0
+        self.cropped = 0
 
-    def add(self, src_image, masks):
-        """masks: {category_id: 二值掩膜 ndarray}，形状须与图像一致。"""
+    def _to_square(self, mask, width, height):
+        """把掩膜对齐到图像尺寸（Drishti 的掩膜比图像小 2x8 像素）。"""
+        if mask is None or mask.shape == (height, width):
+            return mask
+        return np.array(
+            Image.fromarray(mask.astype(np.uint8) * 255).resize(
+                (width, height), Image.NEAREST
+            )
+        ) > 0
+
+    def add(self, src_image, masks, extra_crop=None):
+        """masks: {category_id: 二值掩膜 ndarray}，形状须与图像一致。
+
+        ``extra_crop`` = (x0, y0, x1, y1)，在 ROI 裁剪**之前**先执行。
+        RIM-ONE 用它把左右并排的立体图切成单张眼底（见 convert_rimone）。
+        """
         rel = os.path.basename(src_image)
         with Image.open(src_image) as im:
+            im = im.convert("RGB")
             width, height = im.size
+            masks = {k: self._to_square(v, width, height) for k, v in masks.items()}
 
-        link = os.path.join(self.image_root, rel)
-        if not os.path.lexists(link):
-            os.symlink(os.path.relpath(os.path.abspath(src_image), self.image_root), link)
+            if extra_crop is not None:
+                cx0, cy0, cx1, cy1 = extra_crop
+                im = im.crop((cx0, cy0, cx1, cy1))
+                masks = {
+                    k: (None if v is None else v[cy0:cy1, cx0:cx1])
+                    for k, v in masks.items()
+                }
+                width, height = im.size
+
+            if self.mode == "crop":
+                x0, y0, x1, y1 = fundus_roi_box(im)
+                im = im.crop((x0, y0, x1, y1)).resize(
+                    (self.roi_size, self.roi_size), Image.BILINEAR
+                )
+                cw, ch = self.roi_size, self.roi_size
+                new_masks = {}
+                for k, v in masks.items():
+                    if v is None:
+                        new_masks[k] = None
+                        continue
+                    sub = v[y0:y1, x0:x1]
+                    new_masks[k] = np.array(
+                        Image.fromarray(sub.astype(np.uint8) * 255).resize(
+                            (cw, ch), Image.NEAREST
+                        )
+                    ) > 0
+                masks = new_masks
+                width, height = cw, ch
+                self.cropped += 1
+                out_path = os.path.join(self.image_root, rel)
+                im.save(out_path, quality=self.jpeg_quality)
+            else:
+                link = os.path.join(self.image_root, rel)
+                if not os.path.lexists(link):
+                    os.symlink(
+                        os.path.relpath(os.path.abspath(src_image), self.image_root), link
+                    )
 
         self._img_id += 1
         self.images.append(
@@ -139,12 +236,7 @@ class CocoBuilder:
         for cat_id, mask in masks.items():
             if mask is None:
                 continue
-            if mask.shape != (height, width):
-                mask = np.array(
-                    Image.fromarray(mask.astype(np.uint8) * 255).resize(
-                        (width, height), Image.NEAREST
-                    )
-                ) > 0
+            # 掩膜已在 add() 里随图像一起做过 ROI 裁剪+缩放，这里尺寸必然一致
             for poly in mask_to_polygons(mask):
                 self._ann_id += 1
                 self.annotations.append(
@@ -187,13 +279,13 @@ def report(name, split, builder, path):
 # --------------------------------------------------------------------------- #
 # REFUGE:  0 = cup, 128 = disc annulus, 255 = background
 # --------------------------------------------------------------------------- #
-def convert_refuge():
+def convert_refuge(mode="crop", roi_size=800):
     root = os.path.join(RAW, "REFUGE", "REFUGE")
     if not os.path.isdir(root):
         print("[skip] REFUGE not found"); return
 
     for split, tag in (("train", "train"), ("val", "Valid")):
-        b = CocoBuilder("REFUGE", tag)
+        b = CocoBuilder("REFUGE", tag, mode=mode, roi_size=roi_size)
         imgs = listdir_clean(os.path.join(root, split, "Images"), "*.jpg")
         for img_path in imgs:
             stem = os.path.splitext(os.path.basename(img_path))[0]
@@ -206,7 +298,7 @@ def convert_refuge():
         report("REFUGE", tag, b, b.write())
 
     # test 只有图像，没有 GT
-    b = CocoBuilder("REFUGE", "test")
+    b = CocoBuilder("REFUGE", "test", mode=mode, roi_size=roi_size)
     for img_path in listdir_clean(os.path.join(root, "test", "Images"), "*.jpg"):
         b.add(img_path, {})
     report("REFUGE", "test", b, b.write())
@@ -217,7 +309,7 @@ def convert_refuge():
 # --------------------------------------------------------------------------- #
 # Drishti-GS:  SoftMap 软图，阈值 128；掩膜尺寸比图像小，需放大
 # --------------------------------------------------------------------------- #
-def convert_drishti():
+def convert_drishti(mode="crop", roi_size=800):
     base = os.path.join(RAW, "Drishti_GS")
     if not os.path.isdir(base):
         print("[skip] Drishti_GS not found"); return
@@ -230,7 +322,7 @@ def convert_drishti():
         if not dirs:
             continue
         root = dirs[0]
-        b = CocoBuilder("Drishti_GS", split)
+        b = CocoBuilder("Drishti_GS", split, mode=mode, roi_size=roi_size)
         imgs = listdir_clean(os.path.join(root, "Images", "*"), "*.png")
         for img_path in imgs:
             stem = os.path.splitext(os.path.basename(img_path))[0]
@@ -248,10 +340,32 @@ def convert_drishti():
         report("Drishti_GS", split, b, b.write())
 
 
+def _stereo_half(img_path, disc_mask):
+    """RIM-ONE 的 "Stereo Images" 是**左右两张眼底并排**拼在一张图里
+    （2144x1424 = 2 x 1072x1424），而标注只画在其中一半上。
+
+    实测全部 159 张的 disc 掩膜中心都落在左半（cx/(W/2) 在 0.46~0.56），
+    但这里仍按掩膜实际位置判断，避免硬编码。
+
+    不做这一步的后果很严重：模型会正确地分割出**两只眼**的视盘/视杯，
+    而 GT 只有一份，多出来的预测在 DiceEvaluator 里全部被记为假阳性——
+    RIM-ONE 的 Dice 会从 ~80% 掉到 18%（实测）。
+    """
+    with Image.open(img_path) as im:
+        width, height = im.size
+    if disc_mask is None or disc_mask.sum() == 0:
+        return None
+    _, xs = np.where(disc_mask)
+    centre = (xs.min() + xs.max()) / 2.0
+    half = width // 2
+    return (0, 0, half, height) if centre < half else (half, 0, width, height)
+
+
 # --------------------------------------------------------------------------- #
 # RIM-ONE r3:  无官方划分 -> 固定种子分层划分
 # --------------------------------------------------------------------------- #
-def convert_rimone(expert="avg", test_frac=0.3, seed=20260323):
+def convert_rimone(expert="avg", test_frac=0.2, seed=20260323, mode="crop",
+                   roi_size=800, split_stereo=True):
     base = os.path.join(RAW, "RIM-ONE-r3", "RIM-ONE r3")
     if not os.path.isdir(base):
         print("[skip] RIM-ONE-r3 not found"); return
@@ -281,25 +395,25 @@ def convert_rimone(expert="avg", test_frac=0.3, seed=20260323):
         print("  [ERROR] RIM-ONE: 没找到任何 图像+掩膜 配对，检查 --rimone-expert "
               "与 raw 目录结构"); return
 
-    # 分层划分：每个类别内部按固定种子打乱
+    # 论文 4.2 节：「Each source dataset is randomly divided into an 8:2
+    # train/test split」——整体随机，不做分层。固定种子保证可复现。
     rng = np.random.default_rng(seed)
-    train, test = [], []
-    for label in ("healthy", "glaucoma"):
-        group = sorted([it for it in items if it[3] == label], key=lambda x: x[0])
-        idx = rng.permutation(len(group))
-        n_test = int(round(len(group) * test_frac))
-        test_idx = set(idx[:n_test].tolist())
-        for i, it in enumerate(group):
-            (test if i in test_idx else train).append(it)
+    order = sorted(range(len(items)), key=lambda i: items[i][0])
+    perm = rng.permutation(len(order))
+    n_test = int(round(len(order) * test_frac))
+    test_idx = set(perm[:n_test].tolist())
+    train = [items[order[i]] for i in range(len(order)) if i not in test_idx]
+    test = [items[order[i]] for i in range(len(order)) if i in test_idx]
 
     for split, group in (("train", train), ("test", test)):
-        b = CocoBuilder("RIM_ONE_r3", split)
+        b = CocoBuilder("RIM_ONE_r3", split, mode=mode, roi_size=roi_size)
         for img_path, disc_p, cup_p, _ in group:
             disc = np.array(Image.open(disc_p)) > 0
             cup = np.array(Image.open(cup_p)) > 0
-            b.add(img_path, {DISC_ID: disc, CUP_ID: cup})
+            extra = _stereo_half(img_path, disc) if split_stereo else None
+            b.add(img_path, {DISC_ID: disc, CUP_ID: cup}, extra_crop=extra)
         report("RIM_ONE_r3", split, b, b.write())
-    print("      ^ 该数据集无官方划分；以上为 stratified {:.0f}/{:.0f} 划分 "
+    print("      ^ 该数据集无官方划分；按论文 4.2 节做随机 {:.0f}/{:.0f} 划分 "
           "(expert={}, seed={})".format(
               (1 - test_frac) * 100, test_frac * 100, expert, seed))
 
@@ -312,8 +426,14 @@ def main():
                     default=["REFUGE", "Drishti_GS", "RIM_ONE_r3"],
                     choices=["REFUGE", "Drishti_GS", "RIM_ONE_r3", "ORIGA"])
     ap.add_argument("--rimone-expert", default="avg", choices=["avg", "exp1", "exp2"])
-    ap.add_argument("--rimone-test-frac", type=float, default=0.3)
+    ap.add_argument("--rimone-test-frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=20260323)
+    ap.add_argument("--mode", default="crop", choices=["crop", "link"],
+                    help="crop=按论文裁 ROI 并缩放到 roi-size（默认）；link=只建符号链接")
+    ap.add_argument("--roi-size", type=int, default=800)
+    ap.add_argument("--no-rimone-split-stereo", dest="rimone_split_stereo",
+                    action="store_false", default=True,
+                    help="关闭 RIM-ONE 立体图切半（默认开启）")
     args = ap.parse_args()
 
     os.makedirs(OUT, exist_ok=True)
@@ -322,11 +442,12 @@ def main():
     print()
 
     if "REFUGE" in args.datasets:
-        convert_refuge()
+        convert_refuge(args.mode, args.roi_size)
     if "Drishti_GS" in args.datasets:
-        convert_drishti()
+        convert_drishti(args.mode, args.roi_size)
     if "RIM_ONE_r3" in args.datasets:
-        convert_rimone(args.rimone_expert, args.rimone_test_frac, args.seed)
+        convert_rimone(args.rimone_expert, args.rimone_test_frac, args.seed,
+                       args.mode, args.roi_size, args.rimone_split_stereo)
     if "ORIGA" in args.datasets:
         print("[skip] ORIGA: 本下载只有 jpg + 青光眼分类 csv，没有 OD/OC 分割掩膜，"
               "无法生成 COCO 标注。")
