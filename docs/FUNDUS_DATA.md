@@ -293,7 +293,55 @@ DOMAINS='("Drishti_GS_test",)' bash tools/run_fundus_eval.sh   # 临时覆盖目
 > 只有显式设置 `DOMAINS` 才会覆盖。早期版本无条件用默认值覆盖，会把配置里的
 > `REFUGE_train`/`REFUGE_test` 悄悄挤掉——已修。
 
-### 结果 A：`model_C.pth`（源域 = ORIGA），对齐 Table 1 的 Domain C 列
+### 结果 A：留一法全量复现 Table 1（**主要结果**）
+
+论文 Table 1 的每一列是「在该域上测试、源模型来自其余四个域」的均值
+（"based on five experimental runs"）。用 `tools/run_leave_one_out.sh` 跑齐
+5 个源模型（配置 K 用 `model_K.pth`，测试列表 = 除域 K 外的全部域）：
+
+```bash
+bash tools/run_leave_one_out.sh                       # 跑 A–E
+.venv/bin/python tools/summarize_leave_one_out.py     # 汇总
+```
+
+**逐次运行**（行 = 源模型，列 = 测试数据集，Dice %）：
+
+| 源 | Drishti_test | Drishti_train | REFUGE_Valid | REFUGE_train | RIM_test | RIM_train |
+|---|---|---|---|---|---|---|
+| A | 85.37 | 83.91 | 81.93 | 86.95 | — | — |
+| B | 88.00 | 88.72 | 79.41 | — | 82.90 | 81.27 |
+| C | 89.35 | 88.92 | 81.00 | 81.45 | 88.93 | 89.35 |
+| D | 83.17 | 83.44 | — | 87.85 | 86.49 | 83.52 |
+| E | — | — | 63.16 | 75.06 | 84.96 | 83.51 |
+
+**留一平均 vs 论文 Table 1（DSC）**：
+
+| 测试域 | 本项目 | 论文 | 差值 |
+|---|---|---|---|
+| A (RIM-ONE) | **85.11** | 84.90 | **+0.21** |
+| B (REFUGE) | **82.83** | 83.34 | **−0.51** |
+| C (ORIGA) | n/a（无掩膜） | 84.57 | — |
+| D (REFUGE-Test) | **76.38** | 83.54 | **−7.16** |
+| E (Drishti-GS) | **86.36** | 85.51 | **+0.85** |
+
+**四列中有三列误差在 ±0.85 以内**，可以认为协议已经对齐。
+
+域 D 偏低 7.16 分，来源是单一离群：`model_E`（源域 = Drishti）在
+REFUGE 上只有 63.16，而 A/B/C 都在 79–82。这与形态学差异吻合——
+Drishti 的杯盘比中位数 0.57，REFUGE 只有 0.23，在 Drishti 上训练的模型
+倾向于在 REFUGE 上把视杯预测得过大。`model_E` 在 `REFUGE_train` 上同样最低
+（75.06），两条证据一致。
+
+**与论文的三个口径差异**（解读时务必注意）：
+
+1. **缺 ORIGA**：域 C 整列无法计算；其余四列的测试列表是从官方列表里
+   **剔除 ORIGA** 后的版本，不是论文的完整留一。
+2. **指标口径**：这里用的是仓库 `DiceEvaluator`（每个**预测**取最佳匹配后求
+   均值），不是标准按图/按类 DSC，详见本节末。
+3. **模型来源**：直接使用作者发布的 5 个源模型权重，**没有自己重训源模型**。
+   论文的源模型是「每域随机 8:2」划分训练（SGD, lr 0.001, bs 8）。
+
+### 结果 B：单模型 `model_C.pth` 视图
 
 `configs/test_config_C.yaml`，目标域 = 域 A/B/D/E（不含 ORIGA）。
 数据经 ROI 裁剪→800×800、RIM-ONE 已切半、类别 ID 已按作者顺序修正：
@@ -309,23 +357,14 @@ DOMAINS='("Drishti_GS_test",)' bash tools/run_fundus_eval.sh   # 临时覆盖目
 | **REFUGE_test**（**无标注**） | **0.0000%** | **0.0000%** | **0.0000%** |
 | ~~REFUGE_mean~~ | ~~54.15%~~ | ~~62.59%~~ | ~~57.67%~~ |
 
-**与论文 Table 1 对比**（SPEGC 行，DSC）：
-
-| | Domain A | Domain B | Domain C | Domain D | Domain E |
-|---|---|---|---|---|---|
-| 论文 | 84.90 | 83.34 | 84.57 | 83.54 | 85.51 |
-| 本项目（仅 `model_C`） | **88.93** | **81.45** | — *(无 ORIGA)* | **81.00** | **89.35** |
-
-数量级已经对上（论文全表均值 84.37）。注意口径差异：论文每列是**留一平均**
-（4 个源模型的均值），我们只有 `model_C` 一个源模型；且这里用的是仓库
-`DiceEvaluator` 的口径，不是标准 DSC。
-
 `REFUGE_test` 无标注，三项全 0，把 `REFUGE_mean` 从 81.22% 拖到 54.15%
 （`(81.45+81.00)/2 = 81.22`）。报指标时必须排除该集或补齐标注。
+汇总脚本已把它从域 B 的成员里排除。
 
-### 结果 B：`model_B.pth`（源域 = REFUGE）
+### 结果 C：旧数据（已废弃）
 
-> ⚠️ 此表是**修正类别顺序之前**跑的旧数据，仅供参考量级，不要与上表直接比较。
+> ⚠️ 以下是**修正类别顺序之前**跑的，仅保留作为对比，不要引用。
+
 
 | 数据集 | Dice | Enhanced Alignment | Structural Similarity |
 |---|---|---|---|
