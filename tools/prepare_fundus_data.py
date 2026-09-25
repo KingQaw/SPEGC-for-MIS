@@ -419,11 +419,67 @@ def convert_rimone(expert="avg", test_frac=0.2, seed=20260323, mode="crop",
 
 
 # --------------------------------------------------------------------------- #
+# ORIGA:  互斥标签图 0=背景 / 1=视盘环 / 2=视杯
+# --------------------------------------------------------------------------- #
+def convert_origa(test_frac=0.2, seed=20260323, mode="crop", roi_size=800):
+    """转换 datasets/raw/ORIGA-masked（带掩膜的第三方整理版）。
+
+    掩膜编码**与 REFUGE 同类**：是互斥标签图 `{0,1,2}`，不是二值 0/255。
+    实测 60 张里 59 张满足 `fill_holes(label1) == label1 | label2`，
+    即 **label 1 是视盘环（盘减杯）、label 2 是视杯**，所以：
+
+        disc = (mask != 0)      # 环 ∪ 杯 = 完整视盘
+        cup  = (mask == 2)
+
+    杯/盘面积比中位数 0.370，符合已知的杯盘比范围。
+
+    用哪一套图：该整理版提供三套，**只用 `Images/`（全分辨率原图）**——
+      * `Images_Cropped/` 是紧贴视盘的放大裁剪（只有视盘局部），框错了；
+      * `Images_Square/` 是 512x512 的整幅眼底，分辨率低于原图。
+    `Masks/` 与 `Images/` 逐像素对齐（实测三套图/掩膜尺寸都严格一致）。
+
+    划分：论文 4.2 节说「每域随机 8:2」，这里照做。
+    注意 `OrigaList.csv` 另有一个官方 `Set` 列（A/B 各 325，即 50/50），
+    与论文的 8:2 不同，如需复现官方划分可改这里。
+    """
+    base = os.path.join(RAW, "ORIGA-masked", "ORIGA")
+    if not os.path.isdir(base):
+        print("[skip] ORIGA-masked not found"); return
+
+    items = []
+    for img_path in listdir_clean(os.path.join(base, "Images"), "*.jpg"):
+        stem = os.path.splitext(os.path.basename(img_path))[0]
+        msk_path = os.path.join(base, "Masks", stem + ".png")
+        if not os.path.exists(msk_path):
+            continue
+        items.append((img_path, msk_path))
+    if not items:
+        print("  [ERROR] ORIGA: 没找到 图像+掩膜 配对"); return
+
+    rng = np.random.default_rng(seed)
+    order = sorted(range(len(items)), key=lambda i: items[i][0])
+    perm = rng.permutation(len(order))
+    n_test = int(round(len(order) * test_frac))
+    test_idx = set(perm[:n_test].tolist())
+    train = [items[order[i]] for i in range(len(order)) if i not in test_idx]
+    test = [items[order[i]] for i in range(len(order)) if i in test_idx]
+
+    for split, group in (("train", train), ("test", test)):
+        b = CocoBuilder("ORIGA", split, mode=mode, roi_size=roi_size)
+        for img_path, msk_path in group:
+            m = np.array(Image.open(msk_path))
+            b.add(img_path, {DISC_ID: m != 0, CUP_ID: m == 2})
+        report("ORIGA", split, b, b.write())
+    print("      ^ 掩膜为互斥标签图：disc=(m!=0), cup=(m==2)；随机 {:.0f}/{:.0f} 划分 "
+          "(seed={})".format((1 - test_frac) * 100, test_frac * 100, seed))
+
+
+# --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--datasets", nargs="*",
-                    default=["REFUGE", "Drishti_GS", "RIM_ONE_r3"],
+                    default=["REFUGE", "Drishti_GS", "RIM_ONE_r3", "ORIGA"],
                     choices=["REFUGE", "Drishti_GS", "RIM_ONE_r3", "ORIGA"])
     ap.add_argument("--rimone-expert", default="avg", choices=["avg", "exp1", "exp2"])
     ap.add_argument("--rimone-test-frac", type=float, default=0.2)
@@ -431,6 +487,7 @@ def main():
     ap.add_argument("--mode", default="crop", choices=["crop", "link"],
                     help="crop=按论文裁 ROI 并缩放到 roi-size（默认）；link=只建符号链接")
     ap.add_argument("--roi-size", type=int, default=800)
+    ap.add_argument("--origa-test-frac", type=float, default=0.2)
     ap.add_argument("--no-rimone-split-stereo", dest="rimone_split_stereo",
                     action="store_false", default=True,
                     help="关闭 RIM-ONE 立体图切半（默认开启）")
@@ -449,8 +506,7 @@ def main():
         convert_rimone(args.rimone_expert, args.rimone_test_frac, args.seed,
                        args.mode, args.roi_size, args.rimone_split_stereo)
     if "ORIGA" in args.datasets:
-        print("[skip] ORIGA: 本下载只有 jpg + 青光眼分类 csv，没有 OD/OC 分割掩膜，"
-              "无法生成 COCO 标注。")
+        convert_origa(args.origa_test_frac, args.seed, args.mode, args.roi_size)
 
     print("\n完成。可用以下命令检查注册结果：")
     print("  .venv/bin/python -c \"import data.datasets.builtin as b;"

@@ -9,15 +9,14 @@
 #
 # 所以配置 K 用 weights/fundus_source/model_K.pth，测试列表 = 除域 K 之外的全部域。
 #
-# ⚠️ 数据限制：缺 ORIGA 掩膜，而 ORIGA 是域 C。除配置 C 外，其余配置的官方测试
-#    列表里都含 ORIGA，这里**统一剔除并标注**。因此：
-#      * 域 C (ORIGA) 这一列无法计算
-#      * 其余四列 A/B/D/E 是「剔 ORIGA 后」的留一平均，与论文不完全可比
+# 五个域的数据集本轮已全部齐备（含 ORIGA-masked），下面就是
+# configs/test_segment.yaml 第 5/7/9/11/13 行的**原始列表，未做任何删减**。
 #
 # 用法：
 #   bash tools/run_leave_one_out.sh              # 跑全部 A-E
 #   ONLY=A,B  bash tools/run_leave_one_out.sh    # 只跑指定配置
 #   DEVICE=cpu bash tools/run_leave_one_out.sh   # 无 GPU
+#   NO_ORIGA=1 bash tools/run_leave_one_out.sh   # 若缺 ORIGA 掩膜，自动剔除
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,13 +27,16 @@ CONFIG="${CONFIG:-configs/test_fundus_local.yaml}"
 ONLY="${ONLY:-A,B,C,D,E}"
 TTT_STEPS="${TTT_STEPS:-None}"
 
-# 官方测试列表（test_segment.yaml 第 5/7/9/11/13 行），已剔除 ORIGA_*
+# 官方测试列表（test_segment.yaml 第 5/7/9/11/13 行的原样内容）
+_ORIGA='"ORIGA_train","ORIGA_test",'
+[ -n "${NO_ORIGA:-}" ] && _ORIGA=''
 declare -A DOMAINS
-DOMAINS[A]='("REFUGE_train","REFUGE_test","REFUGE_Valid","Drishti_GS_train","Drishti_GS_test")'
-DOMAINS[B]='("RIM_ONE_r3_train","RIM_ONE_r3_test","REFUGE_Valid","Drishti_GS_train","Drishti_GS_test")'
+DOMAINS[A]="(\"REFUGE_train\",\"REFUGE_test\",${_ORIGA}\"REFUGE_Valid\",\"Drishti_GS_train\",\"Drishti_GS_test\")"
+DOMAINS[B]="(\"RIM_ONE_r3_train\",\"RIM_ONE_r3_test\",${_ORIGA}\"REFUGE_Valid\",\"Drishti_GS_train\",\"Drishti_GS_test\")"
 DOMAINS[C]='("RIM_ONE_r3_train","RIM_ONE_r3_test","REFUGE_train","REFUGE_test","REFUGE_Valid","Drishti_GS_train","Drishti_GS_test")'
-DOMAINS[D]='("RIM_ONE_r3_train","RIM_ONE_r3_test","REFUGE_train","REFUGE_test","Drishti_GS_train","Drishti_GS_test")'
-DOMAINS[E]='("RIM_ONE_r3_train","RIM_ONE_r3_test","REFUGE_train","REFUGE_test","REFUGE_Valid")'
+DOMAINS[D]="(\"RIM_ONE_r3_train\",\"RIM_ONE_r3_test\",\"REFUGE_train\",\"REFUGE_test\",${_ORIGA}\"Drishti_GS_train\",\"Drishti_GS_test\")"
+DOMAINS[E]="(\"RIM_ONE_r3_train\",\"RIM_ONE_r3_test\",\"REFUGE_train\",\"REFUGE_test\",${_ORIGA}\"REFUGE_Valid\")"
+[ -n "${NO_ORIGA:-}" ] && echo "NO_ORIGA=1 -> 已从各配置测试列表剔除 ORIGA_*"
 
 echo "留一法评测   device=$DEVICE  config=$CONFIG  TTT_STEPS=$TTT_STEPS"
 echo "配置: $ONLY"

@@ -141,10 +141,10 @@ def main():
 
     print()
     print("说明：")
-    print("  * 域 C (ORIGA) 无掩膜，其列恒为 n/a。")
-    print("  * 其余四列是「剔除 ORIGA 后」的留一平均，与论文的完整留一不完全可比。")
+    print("  * 五个域现已齐备（含 ORIGA-masked），本表是论文 Table 1 的完整留一结构。")
     print("  * REFUGE_test 无标注（恒 0）已排除在域 B 的成员之外，否则会污染均值。")
     print("  * 仓库 DiceEvaluator 与论文 DSC 口径可能不同，见 docs/FUNDUS_DATA.md。")
+    print("  * 仅 Dice 参与这里的均值；EA / SM 见各 output/loo_*/result.txt。")
     return 0
 
 
