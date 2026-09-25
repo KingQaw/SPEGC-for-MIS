@@ -24,8 +24,10 @@ export MPLCONFIGDIR="${MPLCONFIGDIR:-$REPO_ROOT/.cache/mpl}"
 MODEL="${MODEL:-B}"
 DEVICE="${DEVICE:-cuda}"
 CONFIG="${CONFIG:-configs/test_fundus_local.yaml}"
-# 默认只用 datasets/raw 里确实带 OD/OC 掩膜、且有标注的目标域
-DOMAINS="${DOMAINS:-(\"RIM_ONE_r3_train\",\"RIM_ONE_r3_test\",\"REFUGE_Valid\",\"Drishti_GS_train\",\"Drishti_GS_test\")}"
+# 留空 = 用 CONFIG 里自己写的 DATASETS.TEST（推荐，配置优先）。
+# 只有显式设置 DOMAINS 时才覆盖，例如：
+#   DOMAINS='("Drishti_GS_test",)' bash tools/run_fundus_eval.sh
+DOMAINS="${DOMAINS:-}"
 # None = 跑完整个目标流；设成整数则每个域只做这么多 TTT 步
 TTT_STEPS="${TTT_STEPS:-None}"
 
@@ -35,10 +37,17 @@ OUTPUT_DIR="${OUTPUT_DIR:-output/test_fundus_${MODEL}_${DEVICE}}"
 [ -x "$PY" ]        || { echo "ERROR: 找不到解释器 $PY，先跑 bash tools/setup_env.sh"; exit 1; }
 [ -f "$WEIGHTS" ]   || { echo "ERROR: 找不到权重 $WEIGHTS"; exit 1; }
 
+# 组装覆盖项：DATASETS.TEST 仅在 DOMAINS 非空时追加，否则交给配置文件
+OPTS=(MODEL.WEIGHTS "$WEIGHTS" MODEL.DEVICE "$DEVICE"
+      TEST.MIN_BATCH_NUM "$TTT_STEPS" OUTPUT_DIR "$OUTPUT_DIR")
+if [ -n "$DOMAINS" ]; then
+    OPTS+=(DATASETS.TEST "$DOMAINS")
+fi
+
 echo "配置    : $CONFIG"
 echo "权重    : $WEIGHTS"
 echo "设备    : $DEVICE"
-echo "目标域  : $DOMAINS"
+echo "目标域  : ${DOMAINS:-<取自配置文件>}"
 echo "TTT步数 : $TTT_STEPS"
 echo "输出    : $OUTPUT_DIR"
 echo
@@ -50,11 +59,7 @@ rm -rf "$OUTPUT_DIR"
 "$PY" train_net.py \
     --eval-only --num-gpus 1 \
     --config "$CONFIG" \
-    MODEL.WEIGHTS "$WEIGHTS" \
-    MODEL.DEVICE "$DEVICE" \
-    DATASETS.TEST "$DOMAINS" \
-    TEST.MIN_BATCH_NUM "$TTT_STEPS" \
-    OUTPUT_DIR "$OUTPUT_DIR" \
+    "${OPTS[@]}" \
     2>&1 | grep -vE "UserWarning|floor_divide|torch\.div|return torch|Triggered internally"
 
 echo

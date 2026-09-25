@@ -1,0 +1,65 @@
+# 复现论文 Table 1 中「Domain C」这一列（configs/test_segment.yaml 第 9 行的配置）
+#
+# 论文 4.1/4.2 节：A=RIM-ONE, B=REFUGE, C=ORIGA, D=REFUGE-Test, E=Drishti-GS；
+# Table 1 的 "Domain X" = 在 Domain X 上训练源模型、在**其余四个域**上测试。
+# 因此本配置（C）的测试列表 = 域 A / B / D / E，恰好**不含 ORIGA**。
+#
+# 这正是关键之处：ORIGA 只作为源域出现，而源模型权重已由作者提供
+# (weights/fundus_source/model_C.pth)，所以**即使我们手里没有 ORIGA 的掩膜，
+# 也能完整跑通配置 C**。其余四个配置的测试列表都含 ORIGA，暂时跑不了。
+#
+# 用法：
+#   MODEL=C bash tools/run_fundus_eval.sh
+#   （或直接：python train_net.py --eval-only --config configs/test_config_C.yaml ...）
+#
+# 注意：REFUGE_test 的 400 张图在本下载中**没有标注**，它属于域 B 的数据流。
+# 它会参与无监督适应，但其 Dice 无意义（见 docs/FUNDUS_DATA.md 第 3 节）。
+_BASE_: "./Base-RCNN-FPN.yaml"
+
+OUTPUT_DIR: "output/test_config_C"
+
+DATASETS:
+  # = test_segment.yaml 第 9 行（配置 C）的原始列表
+  TEST: ("RIM_ONE_r3_train", "RIM_ONE_r3_test",
+         "REFUGE_train", "REFUGE_test", "REFUGE_Valid",
+         "Drishti_GS_train", "Drishti_GS_test")
+
+MODEL:
+  META_ARCHITECTURE: "DAobjTwoStagePseudoLabGeneralizedRCNN"
+  MASK_ON: True
+  RESNETS:
+    DEPTH: 50
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+  PROPOSAL_GENERATOR:
+    NAME: "PseudoLabRPN"
+  ROI_HEADS:
+    NAME: "StandardROIHeadsPseudoLab"
+    NUM_CLASSES: 2
+    IN_FEATURES: ["p2", "p3", "p4", "p5"]
+  ROI_BOX_HEAD:
+    NAME: "FastRCNNConvFCHead"
+    NUM_FC: 2
+    POOLER_RESOLUTION: 7
+
+SEMISUPNET:
+  Trainer: baseline
+  BBOX_THRESHOLD: 0.8
+  DIS_TYPE: "p2"
+
+TEST:
+  TTT: True
+  MIN_BATCH_NUM: None      # 论文：每个样本 1 次适应迭代 = 跑满整个流
+  CTTA_POOL_SIZE: 3        # 论文：特征池 3（伪批 4）
+  CTTA_MIN_POOL_SIZE: 1
+  CTTA_ENABLE_SINGLE_GRAPH: True
+
+SOLVER:
+  BASE_LR: 0.005           # 论文：眼底任务的适应学习率
+
+INPUT:
+  FORMAT: "RGB"
+
+DATALOADER:
+  NUM_WORKERS: 0
