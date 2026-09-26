@@ -851,16 +851,49 @@ if branch == "TTT":
 **结论：按发布状态，仓库里的测试时适应是空转的，论文的 SPEGC 方法无法从这份
 代码复现。** 这不是配置问题，是 `detach()` 写在了 TTT 分支的必经路径上。
 
+#### 论文原文怎么写的（arXiv HTML 附录 A / 3.4 节）
+
+正文提到"supplementary materials"，而 **arXiv HTML 版（`arxiv.org/html/2603.11492v1`）
+带完整附录**，里面有决定性内容。
+
+**附录 A 的 Algorithm 1** 明确写出：
+
+```
+29: Acquire semantic predictions P ∈ ℝ^{V×C} for nodes in V* from f_σ
+32: Update all learnable parameters {σ, P_CO, P_HE, W_q, W_k, c_p} by backpropagating L
+34: Generate final prediction O_i ← f_σ(x_i)  (using the updated parameters σ)
+```
+
+- 第 32 行：**源模型参数 σ 明确在可学习集合里**
+- 第 34 行：**推理用的是更新后的 σ**
+
+**3.4 节**定义 `P_i`：
+
+> if two nodes v_i and v_j are structurally similar, their corresponding
+> **semantic predictions** `P_i` and `P_j` must be consistent
+> `L_G = ΣΣ S*_ij · D_KL(P_j || sg(P_i))`
+
+`sg(·)` 是 stop-gradient，只作用在一侧（teacher 式），梯度从 `P_j` 回流到 σ。
+
+#### 代码与论文的两处独立偏差
+
+| | 论文 | 发布代码 |
+|---|---|---|
+| σ（检测网络）是否更新 | **是**（Alg.1 第 32 行） | **否**（`rcnn.py:306` detach，梯度实测为 0） |
+| `P_i` 是什么 | `f_σ` 给出的**语义预测** `∈ℝ^{V×C}` | `softmax(V* @ centroids.T)`，**对 Z=48 个聚类中心**做 softmax（`spegc.py`） |
+
+两处叠加：既回传不到 σ，`P` 也不是论文说的那个量。
+
 要真正复现方法，至少需要：
 
-1. 去掉 `rcnn.py:306` 的 `detach`（并确认 RPN/ROI 头也在计算图内）；
-2. 确认适应时该用哪个损失监督检测网络——论文的 `L_G` 是「结构相似则预测一致」，
-   但 `P_i` 的定义在代码里是 `softmax(V_star @ centroids.T)`，即**聚类分配**，
-   不是检测头的类别预测。**这一点我无法从代码确认论文的原意**，需要作者说明；
+1. 去掉 `rcnn.py:306` 的 `detach`，让梯度回到 σ；
+2. 把 `spegc.py` 里的 `P` 换成**分割头的类别预测**（`∈ℝ^{V×C}`，C 为类别数），
+   而不是聚类分配；
 3. 重新量化适应的增益。
 
-在 1、2 解决之前，**"复现出论文的方法"这件事做不到**；能做到的是复现基准
-（结果 G：五域平均 81.11 vs 论文 84.37）。
+第 1、2 条现在都有论文原文作依据（附录 A 第 29/32/34 行 + 3.4 节），
+不再是猜测。**但这已经属于"按论文修代码"，不是"复现发布版本"了。**
+
 
 ### 指标口径：`DiceEvaluator` 不是标准 DSC
 
