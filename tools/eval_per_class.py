@@ -75,6 +75,8 @@ def main():
     ap.add_argument("--ttt", action="store_true",
                     help="推理前先做测试时适应（SPEGC 的 L_G + lambda*L_C），"
                          "复刻 engine/trainer.py 的 TTT 循环")
+    ap.add_argument("--ttt-lr", type=float, default=None,
+                    help="适应阶段的学习率；不指定则用 config 的 SOLVER.BASE_LR")
     ap.add_argument("--ttt-steps", type=int, default=None,
                     help="每个域最多适应多少步；默认 None = 跑满整个流")
     ap.add_argument("--json", action="store_true",
@@ -114,6 +116,8 @@ def main():
             # 每个域独立适应：重置权重再在该域上跑 TTT。
             # 注意这与仓库 test() 的"连续流"不同——那里一个域适应完的状态会
             # 带到下一个域；这里刻意隔离，才能干净地量化适应本身的增益。
+            if args.ttt_lr is not None:
+                cfg.defrost(); cfg.SOLVER.BASE_LR = args.ttt_lr; cfg.freeze()
             model = build_and_load()
             model.train()
             opt = BaselineTrainer.build_optimizer(cfg, model)
@@ -130,7 +134,8 @@ def main():
                 loss.backward()
                 opt.step()
                 n_ok += 1
-            print(f"  [TTT] {ds}: 有效适应步 {n_ok}，图池未满跳过 {n_none}")
+            print(f"  [TTT] {ds}: 有效适应步 {n_ok}，图池未满跳过 {n_none}"
+                  f"  (lr={args.ttt_lr if args.ttt_lr is not None else cfg.SOLVER.BASE_LR})")
             model.eval()
             del opt, ttt_loader
 

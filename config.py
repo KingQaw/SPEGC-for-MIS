@@ -64,6 +64,12 @@ def add_spegc_config(cfg):
 
     # SPEGC configs
     _C.SEMISUPNET.SPEGC_ENABLE = True
+    # 是否让 TTT 的梯度回传到检测网络（σ）。
+    # False = 发布版本行为：rcnn 里 detach 特征，适应只更新 SPEGC 模块，
+    #         推理路径不用它 -> 适应是空转的（开不开 TTT 结果字节级相同）。
+    # True  = 按论文附录 A Algorithm 1 第 32/34 行，σ 在可学习集合里、
+    #         推理用更新后的 σ。注意：单独打开并不稳定，见 docs/FUNDUS_DATA.md 结果 I。
+    _C.SEMISUPNET.SPEGC_TTT_GRAD = False
     _C.SEMISUPNET.SPEGC_Z = 48
     _C.SEMISUPNET.SPEGC_M = 8
     _C.SEMISUPNET.SPEGC_T = 4

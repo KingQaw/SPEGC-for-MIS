@@ -131,6 +131,7 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
         ttt_pool_size: int = 3,
         ttt_min_pool_size: int = 1,
         spegc_enable: bool = True,
+        spegc_ttt_grad: bool = False,
         spegc_z: int = 48,
         spegc_m: int = 8,
         spegc_t: int = 4,
@@ -177,6 +178,7 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
 
         # SPEGC initialization
         self.spegc_enable = spegc_enable
+        self.spegc_ttt_grad = spegc_ttt_grad
         if self.spegc_enable:
             self.spegc_z = spegc_z
             self.spegc_m = spegc_m
@@ -205,6 +207,7 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             "ttt_pool_size": cfg.SEMISUPNET.TTT_POOL_SIZE,
             "ttt_min_pool_size": cfg.SEMISUPNET.TTT_MIN_POOL_SIZE,
             "spegc_enable": cfg.SEMISUPNET.SPEGC_ENABLE,
+            "spegc_ttt_grad": cfg.SEMISUPNET.SPEGC_TTT_GRAD,
             "spegc_z": cfg.SEMISUPNET.SPEGC_Z,
             "spegc_m": cfg.SEMISUPNET.SPEGC_M,
             "spegc_t": cfg.SEMISUPNET.SPEGC_T,
@@ -302,7 +305,22 @@ class DAobjTwoStagePseudoLabGeneralizedRCNN(GeneralizedRCNN):
             gt_instances = None
 
         features = self.backbone(images.tensor)
-        if branch == "TTT":
+        # 原发布版本这里有一行 `features = {k: v.detach() ...}`，会把梯度完全切断：
+        # 实测 39 步适应后检测网络的 95 个张量变化量为 0，backbone 梯度非零元素数为 0，
+        # 于是 TTT 只能更新 spegc_module / centroids，而推理路径根本不用它们 ——
+        # 适应是空转的，开不开 TTT 结果字节级相同。
+        #
+        # 论文附录 A 的 Algorithm 1 明确写着：
+        #   32: Update all learnable parameters {sigma, P_CO, P_HE, W_q, W_k, c_p}
+        #       by backpropagating L
+        #   34: Generate final prediction O_i <- f_sigma(x_i)
+        #       (using the updated parameters sigma)
+        # 即源模型参数 sigma 必须在可学习集合里、且推理用更新后的 sigma。
+        # 因此这里不再 detach，让 L_G / L_C 的梯度回到 backbone 与检测头。
+        #
+        # 但实测：单独打开并不够（见 docs/FUNDUS_DATA.md 结果 I）——默认仍是
+        # 发布版行为（detach），需要 SEMISUPNET.SPEGC_TTT_GRAD True 才启用。
+        if branch == "TTT" and not self.spegc_ttt_grad:
             features = {k: v.detach() for k, v in features.items()}
 
         # TODO: remove the usage of if else here. This needs to be re-organized
