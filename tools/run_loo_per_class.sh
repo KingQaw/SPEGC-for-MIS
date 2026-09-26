@@ -22,6 +22,8 @@ PY="${PY:-$REPO_ROOT/.venv/bin/python}"
 DEVICE="${DEVICE:-cuda}"
 WD="${WD:-weights/fundus_source}"
 LIMIT="${LIMIT:-0}"                     # 0 = 不限制
+TTT="${TTT:-0}"                         # 1 = 推理前做测试时适应（SPEGC）
+TTT_STEPS="${TTT_STEPS:-}"              # 留空 = 跑满整个流
 OUT="${OUT:-.cache/loo_per_class.json}"
 mkdir -p "$(dirname "$OUT")"
 
@@ -46,6 +48,8 @@ for K in A B C D E; do
     echo "=== model_$K  ->  ${DS[*]}"
     ARGS=(--weights "$W" --datasets "${DS[@]}" --device "$DEVICE" --thresholds 0.9 --json)
     [ "$LIMIT" != "0" ] && ARGS+=(--limit "$LIMIT")
+    [ "$TTT" = "1" ] && ARGS+=(--ttt)
+    [ -n "$TTT_STEPS" ] && ARGS+=(--ttt-steps "$TTT_STEPS")
     "$PY" tools/eval_per_class.py "${ARGS[@]}" 2>/dev/null \
         | sed -n '/--- JSON ---/,$p' | tail -n +2 >> "$OUT"
 done

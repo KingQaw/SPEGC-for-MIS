@@ -806,6 +806,62 @@ WD=output/selftrained bash tools/run_loo_per_class.sh
 `model_D`（源域 = REFUGE_Valid，仅 400 张训练图）是低点。Drishti 列 −3.56
 同样由 `model_D` 的 74.93 拉低。两者都可继续追，但已在合理量级。
 
+### 结果 H：发布的 TTT 实现是**惰性的** —— 方法层面无法复现
+
+前面所有留一法数字都是**纯推理**。为补上方法那一半，给
+`tools/eval_per_class.py` 加了 `--ttt`（复刻 `engine/trainer.py:471-497` 的
+TTT 循环：`loss,_,_,_ = model(inputs, branch='TTT')` → `backward` → `step`），
+并用 `TTT=1 bash tools/run_loo_per_class.sh` 重跑完整留一法。
+
+**结果与关闭 TTT 时字节级完全相同**（`diff .cache/loo_disc.json .cache/loo_ttt.json`
+无差异，五域均仍是 73.67 / 84.43 / 82.98 / 82.52 / 81.95）。
+
+#### 根因：TTT 分支把 backbone 特征 detach 了
+
+`modeling/meta_arch/rcnn.py:304-306`：
+
+```python
+features = self.backbone(images.tensor)
+if branch == "TTT":
+    features = {k: v.detach() for k, v in features.items()}   # ← 显式 detach
+```
+
+`TTTGraphPool.update_pool` 也存 `nodes.detach().clone()`（`rcnn.py:77`）。
+
+实测验证（`model_D` 在 RIM-ONE 上跑 39 步有效适应）：
+
+| | 变化张量 | 最大变化量 |
+|---|---|---|
+| **检测网络**（backbone / roi_heads / proposal_generator） | **0 / 95** | **0.000e+00** |
+| SPEGC 模块 + centroids | 6 / 6 | 1.472 |
+
+并且**第一次有效 loss 反传后，backbone 梯度非零元素数为 0**。
+
+#### 这意味着什么
+
+适应只更新了 `SPEGC` 自己的参数（`P_CO` / `P_HE` / `c_p` / `W_q` / `W_k`）和
+`centroids`。而这两个东西**只出现在 TTT 分支里，推理路径（`inference()`）
+完全不使用它们**——所以无论适应多少步，分割结果一个像素都不会变。
+
+这与论文的表述直接冲突。论文 3.4 节写的是：
+
+> These components jointly drive the **end-to-end fine-tuning of all model
+> parameters** at test time.
+
+**结论：按发布状态，仓库里的测试时适应是空转的，论文的 SPEGC 方法无法从这份
+代码复现。** 这不是配置问题，是 `detach()` 写在了 TTT 分支的必经路径上。
+
+要真正复现方法，至少需要：
+
+1. 去掉 `rcnn.py:306` 的 `detach`（并确认 RPN/ROI 头也在计算图内）；
+2. 确认适应时该用哪个损失监督检测网络——论文的 `L_G` 是「结构相似则预测一致」，
+   但 `P_i` 的定义在代码里是 `softmax(V_star @ centroids.T)`，即**聚类分配**，
+   不是检测头的类别预测。**这一点我无法从代码确认论文的原意**，需要作者说明；
+3. 重新量化适应的增益。
+
+在 1、2 解决之前，**"复现出论文的方法"这件事做不到**；能做到的是复现基准
+（结果 G：五域平均 81.11 vs 论文 84.37）。
+
 ### 指标口径：`DiceEvaluator` 不是标准 DSC
 
 `evaluation/dice_metric.py:49-77` 的实现是：

@@ -72,6 +72,11 @@ def main():
     ap.add_argument("--thresholds", nargs="+", type=float,
                     default=[0.05, 0.5, 0.9],
                     help="逐个分数阈值报告（仓库 DiceEvaluator 用 TEST.DICE_THRES，默认 0.9）")
+    ap.add_argument("--ttt", action="store_true",
+                    help="推理前先做测试时适应（SPEGC 的 L_G + lambda*L_C），"
+                         "复刻 engine/trainer.py 的 TTT 循环")
+    ap.add_argument("--ttt-steps", type=int, default=None,
+                    help="每个域最多适应多少步；默认 None = 跑满整个流")
     ap.add_argument("--json", action="store_true",
                     help="额外以 JSON 输出结果（供留一法驱动脚本汇总）")
     args = ap.parse_args()
@@ -83,9 +88,13 @@ def main():
                          "MODEL.DEVICE", args.device])
     cfg.freeze()
 
-    model = BaselineTrainer.build_model(cfg)
-    DetectionCheckpointer(model, save_dir=cfg.OUTPUT_DIR).resume_or_load(
-        cfg.MODEL.WEIGHTS, resume=False)
+    def build_and_load():
+        m = BaselineTrainer.build_model(cfg)
+        DetectionCheckpointer(m, save_dir=cfg.OUTPUT_DIR).resume_or_load(
+            cfg.MODEL.WEIGHTS, resume=False)
+        return m
+
+    model = build_and_load()
     model.eval()
 
     # 类别名取自 metadata（JSON 的 categories，按 id 升序 → 类 0/类 1）
@@ -101,6 +110,30 @@ def main():
         names = DatasetCatalog.get(ds) and None  # touch to load (populates thing_classes)
         from detectron2.data import MetadataCatalog
         classes = list(MetadataCatalog.get(ds).thing_classes)
+        if args.ttt:
+            # 每个域独立适应：重置权重再在该域上跑 TTT。
+            # 注意这与仓库 test() 的"连续流"不同——那里一个域适应完的状态会
+            # 带到下一个域；这里刻意隔离，才能干净地量化适应本身的增益。
+            model = build_and_load()
+            model.train()
+            opt = BaselineTrainer.build_optimizer(cfg, model)
+            ttt_loader = BaselineTrainer.build_test_loader(cfg, ds)
+            n_ok = n_none = 0
+            for idx, inputs in enumerate(ttt_loader):
+                if args.ttt_steps is not None and idx >= args.ttt_steps:
+                    break
+                loss, _, _, _ = model(inputs, branch="TTT")
+                if loss is None:
+                    n_none += 1
+                    continue
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                n_ok += 1
+            print(f"  [TTT] {ds}: 有效适应步 {n_ok}，图池未满跳过 {n_none}")
+            model.eval()
+            del opt, ttt_loader
+
         loader = BaselineTrainer.build_test_loader(cfg, ds)
         gts = {r["image_id"]: r for r in DatasetCatalog.get(ds)}
         scores = {0: [], 1: []}
