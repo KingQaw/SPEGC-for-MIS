@@ -1,0 +1,72 @@
+# 自训 fundus 源模型（用于在不依赖作者权重的前提下复现留一法）
+#
+# 论文 4.2 节的源模型训练配方：
+#   "Each source dataset is randomly divided into an 8:2 train/test split.
+#    All methods uniformly use a ResNet-50 backbone pre-trained on ImageNet.
+#    During this source training phase, we employ an SGD optimizer with a
+#    momentum of 0.9, a learning rate of 0.001, and a batch size of 8."
+#
+# 为什么需要自己训：作者发布的 weights/fundus_source/*.pth 只训练了
+# 999~2999 步（见 checkpoint 里的 iteration 字段），Mask R-CNN 远未收敛——
+# 实测其视杯分支从不输出高于 0.5 的置信度，等于只学会了视盘。
+# 详见证 docs/FUNDUS_DATA.md 第 5 节。
+#
+# 与论文的两点必要偏差（显存所限，单卡 8GB）：
+#   * IMS_PER_BATCH 用 2 而不是 8，学习率按线性缩放取 0.001*2/8 附近
+#   * 尺寸沿用仓库统一的 800x800
+#
+# 用法（域用命令行覆盖）：
+#   python train_net.py --num-gpus 1 --config configs/train_fundus_source.yaml \
+#       DATASETS.TRAIN '("ORIGA_train",)' DATASETS.TEST '("ORIGA_test",)' \
+#       OUTPUT_DIR output/src_ORIGA
+_BASE_: "./Base-RCNN-FPN.yaml"
+
+OUTPUT_DIR: "output/src_fundus"
+
+DATASETS:
+  TRAIN: ("ORIGA_train",)
+  TEST: ("ORIGA_test",)
+
+MODEL:
+  WEIGHTS: "detectron2://ImageNetPretrained/MSRA/R-50.pkl"
+  META_ARCHITECTURE: "DAobjTwoStagePseudoLabGeneralizedRCNN"
+  MASK_ON: True
+  RESNETS:
+    DEPTH: 50
+    OUT_FEATURES: ["res2", "res3", "res4", "res5"]
+  FPN:
+    IN_FEATURES: ["res2", "res3", "res4", "res5"]
+  PROPOSAL_GENERATOR:
+    NAME: "PseudoLabRPN"
+  ROI_HEADS:
+    NAME: "StandardROIHeadsPseudoLab"
+    NUM_CLASSES: 2          # 类0=视杯, 类1=视盘（顺序必须与 JSON 的 category id 一致）
+    IN_FEATURES: ["p2", "p3", "p4", "p5"]
+  ROI_BOX_HEAD:
+    NAME: "FastRCNNConvFCHead"
+    NUM_FC: 2
+    POOLER_RESOLUTION: 7
+
+SOLVER:
+  AMP:
+    ENABLED: True
+  MAX_ITER: 10000
+  IMS_PER_BATCH: 2
+  BASE_LR: 0.001
+  CHECKPOINT_PERIOD: 2000
+  STEPS: (7000, 9000)
+
+SEMISUPNET:
+  Trainer: baseline
+  BBOX_THRESHOLD: 0.8
+  DIS_TYPE: "p2"
+
+TEST:
+  EVAL_PERIOD: 2000
+  TTT: False                # 源模型训练不需要 TTT
+
+INPUT:
+  FORMAT: "RGB"
+
+DATALOADER:
+  NUM_WORKERS: 4
