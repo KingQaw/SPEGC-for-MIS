@@ -474,6 +474,81 @@ def convert_origa(test_frac=0.2, seed=20260323, mode="crop", roi_size=800):
           "(seed={})".format((1 - test_frac) * 100, test_frac * 100, seed))
 
 
+
+# --------------------------------------------------------------------------- #
+# RIM-ONE DL:  官方 485 张单眼方形图 + 独立的参考分割（Disc/Cup）
+# --------------------------------------------------------------------------- #
+RIMONE_DL_IMG = os.path.join(RAW, "RIM-ONE_DL", "RIM-ONE_DL_images")
+# 参考分割需要单独下载（README: https://bit.ly/rim-one-dl-reference-segmentations）。
+# 常见落盘位置，按顺序探测；也可用 --rimone-dl-seg-dir 指定。
+RIMONE_DL_SEG_CANDIDATES = (
+    os.path.join(RAW, "RIM-ONE_DL", "RIM-ONE_DL_reference_segmentations"),
+    os.path.join(RAW, "RIM-ONE_DL_reference_segmentations"),
+    os.path.join(RAW, "RIM-ONE_DL", "reference_segmentations"),
+)
+
+
+def _find_rimone_dl_seg_dir(explicit=None):
+    if explicit:
+        return explicit if os.path.isdir(explicit) else None
+    for c in RIMONE_DL_SEG_CANDIDATES:
+        if os.path.isdir(c):
+            return c
+    return None
+
+
+def convert_rimone_dl(partition="randomly", seg_dir=None,
+                      mode="crop", roi_size=800, out_names=("RIM_ONE_r3_train",
+                                                             "RIM_ONE_r3_test")):
+    """用 RIM-ONE DL 替换域 A（默认写出与 r3 相同的文件名，便于复用现有配置）。
+
+    与 r3 的差别：
+      * DL 是**已裁好的单眼方形图**（485 张，非黑占比 1.000），没有立体图问题；
+      * DL 自带**官方划分**，两套变体：
+          partitioned_randomly     339 训练 / 146 测试（论文说"随机 8:2"，用这套）
+          partitioned_by_hospital  311 训练 / 174 测试（按医院划分，更难）
+      * 参考分割是**独立下载**的：<名>-1-Disc-T.png / <名>-1-Cup-T.png（专家1）。
+
+    掩膜命名与 r3 的 `-1-` 专家 1 一致，二值 0/255。
+    """
+    if not os.path.isdir(RIMONE_DL_IMG):
+        print("[skip] RIM-ONE_DL 图像目录不存在"); return
+    base = os.path.join(RIMONE_DL_IMG, "partitioned_{}".format(partition))
+    if not os.path.isdir(base):
+        print("  [ERROR] 找不到划分目录 {}（可选 randomly / by_hospital）".format(base)); return
+
+    seg = _find_rimone_dl_seg_dir(seg_dir)
+    if seg is None:
+        print("  [ERROR] 找不到 RIM-ONE DL 参考分割目录。")
+        print("          它需要**单独下载**：https://bit.ly/rim-one-dl-reference-segmentations")
+        print("          下载后解压到以下任一位置即可被自动识别：")
+        for c in RIMONE_DL_SEG_CANDIDATES:
+            print("            " + os.path.relpath(c, REPO))
+        print("          或用 --rimone-dl-seg-dir <路径> 指定。")
+        return
+    print("  参考分割目录: {}".format(os.path.relpath(seg, REPO)))
+
+    for split, tag in (("training_set", "train"), ("test_set", "test")):
+        b = CocoBuilder("RIM_ONE_r3", tag, mode=mode, roi_size=roi_size)
+        n_missing = 0
+        for cls in ("glaucoma", "normal"):
+            for img_path in listdir_clean(os.path.join(base, split, cls), "*.png"):
+                stem = os.path.splitext(os.path.basename(img_path))[0]
+                disc_p = os.path.join(seg, cls, stem + "-1-Disc-T.png")
+                cup_p = os.path.join(seg, cls, stem + "-1-Cup-T.png")
+                if not (os.path.exists(disc_p) and os.path.exists(cup_p)):
+                    n_missing += 1
+                    continue
+                disc = np.array(Image.open(disc_p)) > 0
+                cup = np.array(Image.open(cup_p)) > 0
+                b.add(img_path, {DISC_ID: disc, CUP_ID: cup})
+        report("RIM-ONE DL", tag, b, b.write())
+        if n_missing:
+            print("      ^ 警告：{} 张图缺掩膜，已跳过（检查分割目录结构）".format(n_missing))
+    print("      ^ 已用 RIM-ONE DL（partitioned_{}）覆盖写出 {} / {}".format(
+        partition, out_names[0], out_names[1]))
+
+
 # --------------------------------------------------------------------------- #
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
@@ -488,6 +563,11 @@ def main():
                     help="crop=按论文裁 ROI 并缩放到 roi-size（默认）；link=只建符号链接")
     ap.add_argument("--roi-size", type=int, default=800)
     ap.add_argument("--origa-test-frac", type=float, default=0.2)
+    ap.add_argument("--rimone-source", default="r3", choices=["r3", "dl"],
+                    help="域 A 用哪一版 RIM-ONE：r3（默认，立体图切半）或 dl（官方 485 张单眼图）")
+    ap.add_argument("--rimone-dl-partition", default="randomly",
+                    choices=["randomly", "by_hospital"])
+    ap.add_argument("--rimone-dl-seg-dir", default=None)
     ap.add_argument("--no-rimone-split-stereo", dest="rimone_split_stereo",
                     action="store_false", default=True,
                     help="关闭 RIM-ONE 立体图切半（默认开启）")
@@ -503,8 +583,12 @@ def main():
     if "Drishti_GS" in args.datasets:
         convert_drishti(args.mode, args.roi_size)
     if "RIM_ONE_r3" in args.datasets:
-        convert_rimone(args.rimone_expert, args.rimone_test_frac, args.seed,
-                       args.mode, args.roi_size, args.rimone_split_stereo)
+        if args.rimone_source == "dl":
+            convert_rimone_dl(args.rimone_dl_partition, args.rimone_dl_seg_dir,
+                              args.mode, args.roi_size)
+        else:
+            convert_rimone(args.rimone_expert, args.rimone_test_frac, args.seed,
+                           args.mode, args.roi_size, args.rimone_split_stereo)
     if "ORIGA" in args.datasets:
         convert_origa(args.origa_test_frac, args.seed, args.mode, args.roi_size)
 
