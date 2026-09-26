@@ -535,6 +535,86 @@ TTT 确实在生效——日志里每个域前几步的 loss 从 `None`（图池
 `model_C` 在 RIM-ONE 上从 10.43 收敛到 3.26），说明 SPEGC 的图聚类损失在反传、
 模型在在线适应。
 
+### 结果 D：作者发布的权重严重欠训 —— 以及仓库指标如何掩盖了它
+
+这一节是**对前面"协议已对齐"结论的重要修正**。不联系作者也能查清：把预测按
+类别拆开看就会发现，作者权重**从来没有学会视杯**。
+
+#### 证据 1：checkpoint 里记录的训练步数少得离谱
+
+```
+weights/fundus_source/model_A.pth  iteration =  999
+weights/fundus_source/model_C.pth  iteration =  999
+weights/fundus_source/model_B.pth  iteration = 1999
+weights/fundus_source/model_E.pth  iteration = 1999
+weights/fundus_source/model_D.pth  iteration = 2999
+weights/polyp_source/*.pth         iteration = 8999   ← 对照
+```
+
+#### 证据 2：视杯分支从不输出高置信度预测
+
+`model_C.pth` 在三个域上的分类别统计：
+
+| 数据集 | 视杯预测数 | 视杯分数中位 | 视盘预测数 | 视盘分数中位 |
+|---|---|---|---|---|
+| ORIGA_test | 11 | **0.088** | 73 | 0.998 |
+| REFUGE_Valid | 17 | **0.101** | 60 | 0.989 |
+| Drishti_GS_test | 32 | **0.204** | 79 | 0.999 |
+
+按标准「每图每类取最佳匹配、漏检记 0」算（阈值 0.9）：
+
+| 数据集 | 视杯 Dice | 视盘 Dice | 两类均值 |
+|---|---|---|---|
+| ORIGA_test | **0.00** | 84.93 | 42.47 |
+| REFUGE_Valid | **0.00** | 75.75 | 37.87 |
+| Drishti_GS_test | 1.43 | 90.69 | 46.06 |
+
+**视杯 Dice 恒为 0。**
+
+#### 仓库指标为什么看不出来
+
+`DiceEvaluator` 是「**对每个预测实例**取最佳匹配后求均值」。既然预测几乎全是
+视盘，报出来的 ~85% **实际上就是视盘 Dice**，视杯的塌陷完全不可见。
+所以前面几节基于 `result.txt` 的"与论文对齐"结论**不成立**——口径不同，
+不能直接比。用正确口径衡量，作者权重在 ORIGA 上只有 **41.02**。
+
+#### 解法：自己重训源模型（不需要作者）
+
+材料本来就齐全：五个域 2110 张带标注图、仓库自带训练路径、R-50 ImageNet
+权重（`https://dl.fbaipublicfiles.com/detectron2/ImageNetPretrained/MSRA/R-50.pkl`，
+98 MB，实测可直接下载）。
+
+```bash
+bash tools/train_sources.sh A          # 训练一个域；GPU=1 MAX_ITER=6000 可覆盖
+bash tools/verify_selftrained.sh       # 域内按类验证
+bash tools/run_loo_per_class.sh        # 用正确口径跑留一法
+```
+
+配方按论文 4.2 节：R-50 ImageNet 初始化、SGD momentum 0.9、lr 0.001。
+**唯一偏差**：论文 batch size 8，单卡 8 GB 放不下，用 2（已在配置里注明）。
+训练步数 6000（作者用 999）。
+
+#### 自训结果：视杯在每个域都学得会
+
+| 权重 | 测试集 | 视杯 Dice | 视盘 Dice | 两类均值 |
+|---|---|---|---|---|
+| model_A | RIM_ONE_r3_test | **88.73** | 96.68 | **92.71** |
+| model_C | ORIGA_test | **87.36** | 96.12 | **91.74** |
+| model_D | REFUGE_train | **85.05** | 93.26 | **89.15** |
+| model_E | Drishti_GS_test | **92.82** | 97.03 | **94.92** |
+
+同一份 `ORIGA_test`：作者 `model_C` 两类均值 **41.02** → 自训 **91.74**。
+
+**结论：这是训练预算问题，与数据、架构、类别映射都无关。**
+`model_E` 在 REFUGE/ORIGA 上的"离群"也有了统一解释——它只是 5 个欠训模型里
+恰好最差的那个，不是域差异。
+
+> ⚠️ 域内结果（89–95）**高于**论文 Table 1 的 ~84，两者不可直接比较：
+> 论文每列是**跨域**留一平均，这里是域内。同口径比较见结果 E。
+>
+> ⚠️ 自训权重在 `output/selftrained/`，**未纳入版本控制**（`output/` 被忽略），
+> 复现需按上面命令重训。
+
 ### 指标口径：`DiceEvaluator` 不是标准 DSC
 
 `evaluation/dice_metric.py:49-77` 的实现是：
