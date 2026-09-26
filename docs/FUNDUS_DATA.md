@@ -414,7 +414,12 @@ DOMAINS='("Drishti_GS_test",)' bash tools/run_fundus_eval.sh   # 临时覆盖目
 > 只有显式设置 `DOMAINS` 才会覆盖。早期版本无条件用默认值覆盖，会把配置里的
 > `REFUGE_train`/`REFUGE_test` 悄悄挤掉——已修。
 
-### 结果 A：留一法全量复现 Table 1（**主要结果**）
+### 结果 A：作者权重的留一法（⚠️ 口径有误，已被结果 E 取代）
+
+> **这一节用的是仓库 `DiceEvaluator` 的口径，而它被视盘主导**——作者权重
+> 根本不输出视杯（见结果 D），所以下表的数值**实际上只是视盘 Dice**，
+> 不能与论文的两类均值 DSC 比较。保留仅为记录排查过程。
+> **请直接看结果 E。**
 
 论文 Table 1 的每一列是「在该域上测试、源模型来自其余四个域」的均值
 （"based on five experimental runs"）。用 `tools/run_leave_one_out.sh` 跑齐
