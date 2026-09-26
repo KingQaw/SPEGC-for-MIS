@@ -753,6 +753,59 @@ Interest (ROI)** of each image to 800×800」。对 OD/OC 分割任务而言，*
    其余残差可能来自 Drishti 的掩膜阈值（SoftMap `>=128` 偏松，其杯盘比
    0.601 明显高于其它域）。
 
+### 结果 G：全域视盘居中裁剪 —— **假设成立，RIM-ONE 那一列被修好**
+
+按「论文的 ROI 指视盘区域」这一假设，用 `--roi-mode disc`（factor 1.31，
+推导见下）对四个域统一重转、重训五个源模型、重跑按类留一法：
+
+| 测试域 | 之前（retina 取景） | **现在（disc 取景）** | 论文 | 差值 |
+|---|---|---|---|---|
+| A (RIM-ONE) | 30.47 | **73.67** | 84.90 | **−11.23** |
+| B (REFUGE) | 86.42 | **84.43** | 83.34 | **+1.09** |
+| C (ORIGA) | 85.28 | **82.98** | 84.57 | **−1.59** |
+| D (REFUGE-Test) | 82.45 | **82.52** | 83.54 | **−1.02** |
+| E (Drishti-GS) | 79.84 | **81.95** | 85.51 | **−3.56** |
+| **五域平均** | 72.89 | **81.11** | **84.37** | **−3.26** |
+
+**A 列 +43.2，E 列 +2.1，五域平均 +8.2。五个域全部进入 ±11.2，四个在 ±3.6 以内。**
+
+逐次运行（两类均值 DSC %）：
+
+| 源 | Drishti_test | Drishti_train | ORIGA_test | ORIGA_train | REFUGE_Valid | REFUGE_train | RIM_test | RIM_train |
+|---|---|---|---|---|---|---|---|---|
+| A | 85.37 | 86.96 | 74.47 | 84.62 | 75.07 | 83.01 | — | — |
+| B | 82.00 | 76.76 | 81.88 | 85.01 | 88.66 | — | 67.32 | 70.06 |
+| C | 88.26 | 86.36 | — | — | 87.44 | 83.66 | 82.18 | 84.28 |
+| D | 74.42 | 75.44 | 82.72 | 84.97 | — | 82.00 | 57.75 | 59.09 |
+| E | — | — | 83.86 | 86.32 | 78.92 | 89.03 | 83.85 | 84.83 |
+
+**结论：论文 4.2 节的 "Region of Interest (ROI)" 指的是视盘区域，不是整幅视网膜。**
+四个域统一做视盘居中裁剪后取景尺度才一致，跨域迁移才成立。此前把 REFUGE /
+ORIGA / Drishti 当整幅眼底、只对 RIM-ONE 用官方特写图，是最主要的残差来源。
+
+这也解释了为什么先前 B/C/D 看起来"已经对齐"：整幅眼底的取景对**域内**学习没
+问题（模型能找到视盘），但域间尺度不一致，一旦某个域是特写就彻底崩掉。
+统一后 B/C/D 略有下降（86.42→84.43 等）但仍在 ±1.6，因为源模型也要重新适应
+新的取景——这是**一致性换来的**，整体明显更优。
+
+复现命令：
+
+```bash
+# 1) 全域视盘居中裁剪（域 A 用 RIM-ONE DL，Drishti 用阈值 255）
+.venv/bin/python tools/prepare_fundus_data.py \
+    --datasets REFUGE Drishti_GS ORIGA RIM_ONE_r3 \
+    --roi-mode disc --disc-crop-factor 1.31 \
+    --drishti-threshold 255 --rimone-source dl
+# 2) 重训五个源模型（双卡：GPU0 "C B" / GPU1 "A D E"）
+GPU=0 MAX_ITER=6000 DOMAINS="C B" bash tools/train_sources.sh
+# 3) 按类留一法
+WD=output/selftrained bash tools/run_loo_per_class.sh
+```
+
+剩余的 A 列 −11.23：A 的每个源模型是 68.69 / 83.23 / 58.42 / 84.34，
+`model_D`（源域 = REFUGE_Valid，仅 400 张训练图）是低点。Drishti 列 −3.56
+同样由 `model_D` 的 74.93 拉低。两者都可继续追，但已在合理量级。
+
 ### 指标口径：`DiceEvaluator` 不是标准 DSC
 
 `evaluation/dice_metric.py:49-77` 的实现是：
