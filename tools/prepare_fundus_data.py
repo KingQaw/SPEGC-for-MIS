@@ -307,9 +307,19 @@ def convert_refuge(mode="crop", roi_size=800):
 
 
 # --------------------------------------------------------------------------- #
-# Drishti-GS:  SoftMap 软图，阈值 128；掩膜尺寸比图像小，需放大
+# Drishti-GS:  SoftMap 软图，阈值可调；掩膜尺寸比图像小，需放大
 # --------------------------------------------------------------------------- #
-def convert_drishti(mode="crop", roi_size=800):
+def convert_drishti(mode="crop", roi_size=800, thresh=128):
+    """SoftMap 是多专家一致性软图（取值 0/64/128/191/255），需阈值二值化。
+
+    ``thresh`` 的含义（SoftMap 值 = 认可该像素为前景的专家比例）：
+      * ``>=128``（默认，过半同意）——论文未指定，这是文献里最常见的取法；
+      * ``>=255``（全体同意）——更保守，掩膜更小、杯盘比更低。
+
+    Drishti 的杯盘比中位数在 ``>=128`` 下是 0.601，明显高于其它三个域
+    （REFUGE 0.238 / RIM-ONE 0.223 / ORIGA 0.351），所以这个阈值可能偏松。
+    用 ``--drishti-threshold 255`` 可以对比。
+    """
     base = os.path.join(RAW, "Drishti_GS")
     if not os.path.isdir(base):
         print("[skip] Drishti_GS not found"); return
@@ -334,10 +344,11 @@ def convert_drishti(mode="crop", roi_size=800):
                 continue
             with Image.open(img_path) as im:
                 w, h = im.size
-            od = np.array(Image.open(od_p).resize((w, h), Image.NEAREST)) >= 128
-            cup = np.array(Image.open(cup_p).resize((w, h), Image.NEAREST)) >= 128
+            od = np.array(Image.open(od_p).resize((w, h), Image.NEAREST)) >= thresh
+            cup = np.array(Image.open(cup_p).resize((w, h), Image.NEAREST)) >= thresh
             b.add(img_path, {DISC_ID: od, CUP_ID: cup})
         report("Drishti_GS", split, b, b.write())
+    print("      ^ SoftMap 阈值 >={}".format(thresh))
 
 
 def _stereo_half(img_path, disc_mask):
@@ -568,6 +579,8 @@ def main():
     ap.add_argument("--rimone-dl-partition", default="randomly",
                     choices=["randomly", "by_hospital"])
     ap.add_argument("--rimone-dl-seg-dir", default=None)
+    ap.add_argument("--drishti-threshold", type=int, default=128,
+                    help="Drishti SoftMap 二值化阈值：128=过半专家同意（默认），255=全体同意")
     ap.add_argument("--no-rimone-split-stereo", dest="rimone_split_stereo",
                     action="store_false", default=True,
                     help="关闭 RIM-ONE 立体图切半（默认开启）")
@@ -581,7 +594,7 @@ def main():
     if "REFUGE" in args.datasets:
         convert_refuge(args.mode, args.roi_size)
     if "Drishti_GS" in args.datasets:
-        convert_drishti(args.mode, args.roi_size)
+        convert_drishti(args.mode, args.roi_size, args.drishti_threshold)
     if "RIM_ONE_r3" in args.datasets:
         if args.rimone_source == "dl":
             convert_rimone_dl(args.rimone_dl_partition, args.rimone_dl_seg_dir,
